@@ -1,0 +1,32 @@
+# Copy this file to .mewcode/config.yaml.
+providers:
+  - name: anthropic
+    protocol: anthropic
+    base_url: https://api.anthropic.com
+    model: claude-sonnet-4-5
+    # Prefer ANTHROPIC_API_KEY in the environment. You may also set api_key here.
+    thinking: false
+    context_window: 200000
+    max_output_tokens: 8192
+
+permission_mode: default
+
+# Worktree support and automatic memory are enabled by default. These settings
+# tune worktree lifecycle behavior; they do not create a worktree at startup.
+worktree:
+  symlink_directories:
+    - node_modules
+    - .venv
+    - vendor
+  stale_cleanup_interval: 3600
+  stale_cutoff_hours: 24
+
+# Optional OS-level command isolation. MewCode enables auto_allow only when a
+# supported sandbox is actually available (bubblewrap on Linux, Seatbelt on macOS).
+sandbox:
+  enabled: false
+  auto_allow: false
+  network_enabled: false
+
+mcp_servers: []
+hooks: []
