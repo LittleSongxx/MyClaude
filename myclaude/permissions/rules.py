@@ -12,6 +12,8 @@ from typing import Any, Literal
 
 import yaml
 
+from myclaude.tools.file_io import atomic_write_text, locked_path
+
 Effect = Literal["allow", "deny", "ask"]
 
 _RULE_RE = re.compile(r"^(\w+)\((.+)\)$")
@@ -134,7 +136,12 @@ class RuleEngine:
         if self._local_path is None:
             return
         self._local_path.parent.mkdir(parents=True, exist_ok=True)
-        existing = _load_rules_file(self._local_path)
-        existing.append(rule)
-        entries = [{"rule": f"{r.tool_name}({r.pattern})", "effect": r.effect} for r in existing]
-        self._local_path.write_text(yaml.dump(entries, allow_unicode=True), encoding="utf-8")
+        # 权限规则是安全配置，read-modify-write 必须串行化并原子落盘：
+        # 非原子 write_text 在并发 ALLOW_ALWAYS 下会丢失更新或写出半截文件。
+        with locked_path(self._local_path):
+            existing = _load_rules_file(self._local_path)
+            existing.append(rule)
+            entries = [{"rule": f"{r.tool_name}({r.pattern})", "effect": r.effect} for r in existing]
+            atomic_write_text(
+                self._local_path, yaml.dump(entries, allow_unicode=True)
+            )

@@ -604,7 +604,7 @@ def test_environment_context():
     ctx = build_environment_context("/home/user/project")
     assert "/home/user/project" in ctx
     assert "Operating system" in ctx
-    assert "Current time" in ctx
+    assert "Current date" in ctx
 
 
 @pytest.mark.asyncio
@@ -664,3 +664,88 @@ async def test_streaming_tool_execution():
     assert len(c["tool_result"]) == 2
     # 工具应该在流式阶段就开始执行，所以 execution_log 至少有记录
     assert len(execution_log) >= 2, "工具未在流式阶段执行"
+
+
+# ---------------------------------------------------------------------------
+# A1: 共享 Runtime 注入的动态召回（recall_fn）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_recall_fn_auto_launches_and_injects():
+    """注入 recall_fn 后，Agent 自行按最近用户消息启动召回并可注入（TUI 之外也生效）。
+
+    直接验证 _maybe_start_recall + _consume_memory_recall 的确定性核心逻辑，
+    避开「末轮召回以后台任务 fire-and-forget 消费」带来的时序竞争（见 §9.1）。
+    """
+    captured: dict[str, str] = {}
+
+    async def recall_fn(query: str) -> str:
+        captured["query"] = query
+        return "REMEMBERED CONTEXT"
+
+    agent = Agent(
+        MockLLMClient([]), create_default_registry(), "anthropic",
+        work_dir=".", recall_fn=recall_fn,
+    )
+    conv = ConversationManager()
+    conv.add_user_message("please fix the parser bug")
+
+    # Agent 自行启动召回（不依赖 TUI prefetch）
+    agent._maybe_start_recall(conv)
+    assert agent.memory_recall_task is not None
+
+    # 阻塞消费，确定性验证按最近用户消息触发 + 结果注入对话
+    await agent._consume_memory_recall(conv, wait=True)
+    assert captured.get("query") == "please fix the parser bug"
+    assert any(
+        "REMEMBERED CONTEXT" in m.content for m in conv.history
+    ), "召回结果未注入对话"
+
+
+@pytest.mark.asyncio
+async def test_recall_fn_does_not_override_preset_task():
+    """TUI 已通过 prefetch 设置 memory_recall_task 时，Agent 不重复启动召回。"""
+    agent_launched = False
+
+    async def recall_fn(query: str) -> str:
+        nonlocal agent_launched
+        agent_launched = True
+        return "AGENT-LAUNCHED"
+
+    async def preset() -> str:
+        return "PRESET"
+
+    agent = Agent(
+        MockLLMClient([]), create_default_registry(), "anthropic",
+        work_dir=".", recall_fn=recall_fn,
+    )
+    conv = ConversationManager()
+    conv.add_user_message("q")
+    # 模拟 TUI 的 prefetch 抢先设置
+    preset_task = asyncio.ensure_future(preset())
+    agent.memory_recall_task = preset_task
+
+    agent._maybe_start_recall(conv)
+    # 不覆盖已有 task，也不调用注入的 recall_fn
+    assert agent.memory_recall_task is preset_task
+
+    await agent._consume_memory_recall(conv, wait=True)
+    assert agent_launched is False, "已有 recall task 时不应重复启动"
+    assert any("PRESET" in m.content for m in conv.history)
+
+
+@pytest.mark.asyncio
+async def test_no_recall_fn_is_inert():
+    """未注入 recall_fn（如未启用记忆）时不启动召回，行为不变。"""
+    client = MockLLMClient([
+        [TextDelta("hi"), StreamEnd("end_turn", input_tokens=1, output_tokens=1)],
+    ])
+    agent = Agent(client, create_default_registry(), "anthropic", work_dir=".")
+    conv = ConversationManager()
+    conv.add_user_message("q")
+
+    async for _ in agent.run(conv):
+        pass
+
+    assert agent.memory_recall_task is None

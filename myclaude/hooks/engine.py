@@ -27,6 +27,10 @@ class HookEngine:
         self.hooks: list[Hook] = hooks or []
         self._prompt_messages: list[str] = []
         self._notifications: list[HookNotification] = []
+        # 异步 hook 以 fire-and-forget 方式派发。必须持有强引用，否则 event loop
+        # 只保留弱引用，任务可能在运行途中被 GC；同时也让 Runtime 退出前能够
+        # drain/cancel，避免外部脚本把未完成的副作用留在进程关闭之后。
+        self._async_tasks: set[asyncio.Task] = set()
 
 
     def find_matching_hooks(self, event: str, ctx: HookContext) -> list[Hook]:
@@ -47,9 +51,27 @@ class HookEngine:
         for hook in matched:
             hook.mark_executed()
             if hook.async_exec:
-                asyncio.ensure_future(self._run_single(hook, ctx))
+                task = asyncio.create_task(self._run_single(hook, ctx))
+                self._async_tasks.add(task)
+                task.add_done_callback(self._async_tasks.discard)
             else:
                 await self._run_single(hook, ctx)
+
+
+    async def drain_async_hooks(self, timeout: float | None = None) -> None:
+        """等待在途异步 hook 结束；超时后取消剩余任务。
+
+        Runtime 退出前调用，确保外部脚本的副作用要么完成、要么被显式取消，
+        而不是随进程关闭被静默丢弃。
+        """
+        pending = [t for t in self._async_tasks if not t.done()]
+        if not pending:
+            return
+        done, still_pending = await asyncio.wait(pending, timeout=timeout)
+        for task in still_pending:
+            task.cancel()
+        if still_pending:
+            await asyncio.gather(*still_pending, return_exceptions=True)
 
 
     async def _run_single(self, hook: Hook, ctx: HookContext) -> None:

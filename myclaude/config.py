@@ -4,6 +4,7 @@
 # 简历模版：jianli.xiaolinnote.com
 from __future__ import annotations
 
+import copy
 import os
 import re
 from dataclasses import dataclass, field, replace
@@ -48,6 +49,10 @@ class ProviderConfig:
     max_output_tokens: int = 0
     input_cost_per_million: float = 0.0
     output_cost_per_million: float = 0.0
+    # 缓存读/写单价。None 表示未配置 —— UsageLedger 会回退到 input 单价。
+    # 分开配置可避免在 cache-heavy 场景用 input 单价高估成本。
+    cache_read_cost_per_million: float | None = None
+    cache_write_cost_per_million: float | None = None
     # 运行时 cache，存放从 provider 的 /v1/models 端点自动拉取的 context window
     # （get_context_window 的第 2 层）。通过 set_fetched_context_window() 写入一次；
     # 0 表示"尚未拉取"。不会持久化。
@@ -182,6 +187,8 @@ def _load_single_file(path: Path, *, require_providers: bool = True) -> AppConfi
             max_output_tokens=p["max_output_tokens"],
             input_cost_per_million=p["input_cost_per_million"],
             output_cost_per_million=p["output_cost_per_million"],
+            cache_read_cost_per_million=p["cache_read_cost_per_million"],
+            cache_write_cost_per_million=p["cache_write_cost_per_million"],
         )
         for p in validated["providers"]
     ]
@@ -247,6 +254,8 @@ def _load_single_file(path: Path, *, require_providers: bool = True) -> AppConfi
 
 
 def _merge_config(base: AppConfig, override: AppConfig) -> AppConfig:
+    # 深拷贝 base，避免原地修改调用方传入的对象（C-6）
+    base = copy.deepcopy(base)
     explicit = override._explicit_fields
     if "providers" in explicit:
         base.providers = override.providers

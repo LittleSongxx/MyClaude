@@ -19,6 +19,7 @@ from myclaude.memory.instructions import load_instructions, process_includes
 from myclaude.memory.recall import (
     RelevantMemory,
     find_relevant_memories,
+    make_recall_fn,
     render_reminder,
 )
 from myclaude.memory.session import (
@@ -47,6 +48,7 @@ __all__ = [
     "build_memory_prompt",
     "ensure_memory_dir_exists",
     "find_relevant_memories",
+    "make_recall_fn",
     "generate_session_summary",
     "get_auto_mem_path",
     "get_user_auto_mem_path",

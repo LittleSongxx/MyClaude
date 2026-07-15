@@ -4,7 +4,10 @@ description: Fast read-only search agent for locating code
 disallowedTools:
   - EditFile
   - WriteFile
-model: haiku
+# 默认继承父 Agent 的模型与 Provider。此前固定为 haiku，会在父 Agent 使用
+# OpenAI / 兼容 Provider 时把 Claude 模型名发到错误端点。需要用更便宜/更快的
+# 模型探索时，应通过配置显式绑定到一个已校验的 Provider profile，而非硬编码别名。
+model: inherit
 # maxTurns not capped (defaults to 200). Previous 30-turn cap tripped when
 # the LLM had to issue many ToolSearch/Glob/Grep calls to map an unfamiliar
 # repo, causing the spawn to fail with "reached maximum iterations" before it

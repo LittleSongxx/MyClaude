@@ -452,3 +452,24 @@ class TestAgentSkillIntegration:
 
         real_agent.clear_active_skills()
         assert len(real_agent.active_skills) == 0
+
+    def test_activate_skill_records_recovery_state(self) -> None:
+        """通过 activate_skill 激活的 skill 必须进 recovery_state。
+
+        LoadSkill 模型工具走的就是 activate_skill；若不记录，auto-compact
+        后的恢复附件会丢掉该 skill 的 SOP。这里锁定"入口统一记录"的行为。
+        """
+        from unittest.mock import MagicMock
+
+        from myclaude.agent import Agent
+
+        real_agent = MagicMock(spec=Agent)
+        real_agent.active_skills = {}
+        real_agent.recovery_state = MagicMock()
+        real_agent.activate_skill = Agent.activate_skill.__get__(real_agent)
+
+        real_agent.activate_skill("planner", "step 1\nstep 2")
+
+        real_agent.recovery_state.record_skill_invocation.assert_called_once_with(
+            "planner", "step 1\nstep 2"
+        )

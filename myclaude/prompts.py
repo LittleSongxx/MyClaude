@@ -371,10 +371,14 @@ def build_environment_context(
     skill_catalog: str = "",
     agent_catalog: str = "",
 ) -> str:
+    # 仅保留到「日期」粒度：本环境上下文作为 history[0] 注入，每轮请求都会重建。
+    # 若带秒级时间戳，消息序列前缀会每次变化，导致 provider prompt cache 从第一条
+    # 消息就 miss。日期粒度在一天内稳定，缓存前缀得以命中；需要更细的运行时状态
+    # （如精确时间、运行预算）应放到对话末尾的 turn state，而非稳定前缀。
     parts = [
         f"Current working directory: {work_dir}",
         f"Operating system: {platform.system()} {platform.release()}",
-        f"Current time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"Current date: {datetime.now().strftime('%Y-%m-%d')}",
     ]
 
     if agent_catalog:

@@ -706,6 +706,21 @@ class AgentTool(Tool):
         }
         model_id = model_map.get(model_alias, model_alias)
 
+        # 协议兼容性 guard：子 client 沿用父的 protocol/base_url。若把 Claude 模型名
+        # 发到非 anthropic 端点（父用 openai / openai-compat），会命中错误模型甚至报错。
+        # 这种明确的错配直接放弃 override，回退到父 client（_select_llm 处理 None）。
+        parent_protocol = self._provider_config.protocol
+        is_claude_model = model_alias in model_map or model_id.startswith("claude")
+        if is_claude_model and parent_protocol != "anthropic":
+            log.warning(
+                "Sub-agent model '%s' resolves to a Claude model but parent protocol "
+                "is '%s'; ignoring override and inheriting parent model to avoid "
+                "cross-provider misrouting.",
+                model_alias,
+                parent_protocol,
+            )
+            return None
+
         config = ProviderConfig(
             name=f"sub-{model_alias}",
             protocol=self._provider_config.protocol,
@@ -716,6 +731,8 @@ class AgentTool(Tool):
             max_output_tokens=self._provider_config.max_output_tokens,
             input_cost_per_million=self._provider_config.input_cost_per_million,
             output_cost_per_million=self._provider_config.output_cost_per_million,
+            cache_read_cost_per_million=self._provider_config.cache_read_cost_per_million,
+            cache_write_cost_per_million=self._provider_config.cache_write_cost_per_million,
         )
         try:
             return create_client(

@@ -130,16 +130,32 @@ class WorktreeManager:
 
             head_sha = self.read_worktree_head_sha(wt_path)
             if head_sha is not None:
-                log.info("Fast recovery: reusing existing worktree at %s", wt_path)
-                wt = Worktree(
-                    name=name,
-                    path=wt_path,
-                    branch=branch_name,
-                    based_on=base_branch,
-                    head_commit=head_sha,
+                # 快速恢复路径：验证已有 worktree 的实际分支与预期一致，
+                # 防止复用上次不同 session 遗留的错误分支（C-2）
+                branch_check = self._run_git(
+                    ["-C", wt_path, "rev-parse", "--abbrev-ref", "HEAD"]
                 )
-                self.active[name] = wt
-                return wt
+                actual_branch = branch_check.stdout.strip() if branch_check.returncode == 0 else ""
+                if actual_branch == branch_name:
+                    log.info("Fast recovery: reusing existing worktree at %s", wt_path)
+                    wt = Worktree(
+                        name=name,
+                        path=wt_path,
+                        branch=branch_name,
+                        based_on=base_branch,
+                        head_commit=head_sha,
+                    )
+                    self.active[name] = wt
+                    return wt
+                else:
+                    log.warning(
+                        "Fast recovery: worktree at %s has branch %r, expected %r; "
+                        "pruning and re-creating",
+                        wt_path, actual_branch, branch_name,
+                    )
+                    # 先清理孤立的 worktree，再走正常创建流程；
+                    # 失败也继续——git worktree add 会给出清晰报错
+                    self._run_git(["worktree", "remove", "--force", wt_path])
 
             os.makedirs(self.worktree_dir, exist_ok=True)
 

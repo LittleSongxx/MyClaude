@@ -58,6 +58,41 @@ class TestPersistToolResult:
         fp = tmp_path / "toolu_002.txt"
         assert fp.read_text() == "first"
 
+    def test_traversal_id_stays_in_session_dir(self, tmp_path: Path) -> None:
+        # 恶意/异常 provider ID 带 ../ 时，不能写到 session_dir 之外。
+        session_dir = tmp_path / "session"
+        session_dir.mkdir()
+        outside = tmp_path / "etc_evil"
+        fp = persist_tool_result("../../etc_evil", "payload", session_dir)
+        assert not outside.exists()
+        assert fp.resolve().is_relative_to(session_dir.resolve())
+        assert fp.read_text() == "payload"
+
+    def test_absolute_id_stays_in_session_dir(self, tmp_path: Path) -> None:
+        # 绝对路径形态的 ID 不能让 pathlib 丢弃 session_dir 前缀。
+        session_dir = tmp_path / "session"
+        session_dir.mkdir()
+        target = tmp_path / "abs_target"
+        fp = persist_tool_result(f"{target}", "payload", session_dir)
+        assert not target.exists()
+        assert fp.resolve().is_relative_to(session_dir.resolve())
+
+    def test_unsafe_id_is_deterministic(self, tmp_path: Path) -> None:
+        # 同一不安全 ID 必须稳定映射到同一文件，否则 O_EXCL 幂等失效。
+        fp1 = persist_tool_result("a/b/../c", "first", tmp_path)
+        fp2 = persist_tool_result("a/b/../c", "second", tmp_path)
+        assert fp1 == fp2
+        assert fp1.read_text() == "first"
+
+    def test_spill_file_is_owner_only(self, tmp_path: Path) -> None:
+        import os
+        import stat
+
+        fp = persist_tool_result("toolu_perm", "secret", tmp_path)
+        mode = stat.S_IMODE(os.stat(fp).st_mode)
+        # 不允许 group/other 位（工具结果可能含敏感内容）。
+        assert mode & 0o077 == 0
+
 # ---------------------------------------------------------------------------
 # make_persisted_preview
 # ---------------------------------------------------------------------------

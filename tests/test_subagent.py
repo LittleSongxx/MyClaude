@@ -196,7 +196,8 @@ class TestAgentLoader:
         assert "Explore" in agents
         assert "Plan" in agents
         assert "general-purpose" in agents
-        assert agents["Explore"].model == "haiku"
+        # Explore 默认继承父模型，避免把 Claude 模型名发到非 Anthropic 端点。
+        assert agents["Explore"].model == "inherit"
         assert agents["Explore"].max_turns == 200  # 对齐 Go 默认值
 
     def test_verification_disabled_by_default(self, tmp_path: Path):
@@ -589,6 +590,40 @@ class TestTaskManager:
     def test_cancel_nonexistent(self):
         tm = TaskManager()
         assert tm.cancel("nope") is False
+
+    @pytest.mark.asyncio
+    async def test_drain_waits_for_pending_tasks(self, mock_agent):
+        """drain 应等待在途后台任务收尾（B2：Headless 结束前不静默丢弃）。"""
+        async def slow(*a, **kw):
+            await asyncio.sleep(0.1)
+            return "done"
+
+        mock_agent.run_to_completion = slow
+        tm = TaskManager()
+        task_id = tm.launch(mock_agent, "slow task")
+        # 任务尚未完成
+        assert tm.get(task_id).status == "running"
+
+        await tm.drain(timeout=5.0)
+
+        # drain 返回后任务已收尾，不再运行
+        assert not any(not t.done() for t in tm._async_tasks.values())
+
+    @pytest.mark.asyncio
+    async def test_drain_cancels_past_timeout(self, mock_agent):
+        """超过 drain 预算的任务被取消，不会无限阻塞退出。"""
+        async def never(*a, **kw):
+            await asyncio.sleep(100)
+            return "done"
+
+        mock_agent.run_to_completion = never
+        tm = TaskManager()
+        tm.launch(mock_agent, "endless task")
+
+        await tm.drain(timeout=0.05)
+
+        # 预算耗尽后任务被取消收敛
+        assert all(t.done() for t in tm._async_tasks.values())
 
 # =====================================================================
 # 7. 通知

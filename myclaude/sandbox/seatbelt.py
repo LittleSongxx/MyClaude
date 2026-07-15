@@ -52,11 +52,13 @@ def _build_profile(config: SandboxConfig) -> str:
         rules.append(f'(allow file-write* (subpath "{resolved}"))')
 
     # 禁止写入的路径（覆盖 allow，Seatbelt 后声明的规则优先）
-    # 单文件用 literal 精确匹配，目录用 subpath 前缀匹配
+    # 统一使用 subpath 前缀匹配：既能覆盖目录及其所有子路径，也能精确匹配单文件。
+    # 使用 literal 的旧逻辑存在隐患——若路径在沙箱创建时尚不存在（is_dir() 返回
+    # False），只会禁止该精确路径本身，其子文件仍可写；subpath 则始终前缀匹配，
+    # 无论路径是否存在都能正确保护该路径及其后代。
     for path in config.deny_write:
         resolved = str(Path(path).resolve())
-        matcher = "subpath" if Path(resolved).is_dir() else "literal"
-        rules.append(f'(deny file-write* ({matcher} "{resolved}"))')
+        rules.append(f'(deny file-write* (subpath "{resolved}"))')
 
     # 网络访问控制
     if config.network_enabled:

@@ -118,10 +118,14 @@ class LLMClient(ABC):
         usage_ledger: UsageLedger | None = None,
         input_cost_per_million: float = 0.0,
         output_cost_per_million: float = 0.0,
+        cache_read_cost_per_million: float | None = None,
+        cache_write_cost_per_million: float | None = None,
     ) -> None:
         self._usage_ledger = usage_ledger or UsageLedger(
             input_cost_per_million=input_cost_per_million,
             output_cost_per_million=output_cost_per_million,
+            cache_read_cost_per_million=cache_read_cost_per_million,
+            cache_write_cost_per_million=cache_write_cost_per_million,
         )
         self._usage_purpose: ContextVar[str] = ContextVar(
             f"myclaude_usage_purpose_{id(self)}", default="agent"
@@ -196,6 +200,8 @@ class AnthropicClient(LLMClient):
             usage_ledger=usage_ledger,
             input_cost_per_million=config.input_cost_per_million,
             output_cost_per_million=config.output_cost_per_million,
+            cache_read_cost_per_million=config.cache_read_cost_per_million,
+            cache_write_cost_per_million=config.cache_write_cost_per_million,
         )
         self.model = config.model
         self.thinking = config.thinking
@@ -405,6 +411,8 @@ class OpenAIClient(LLMClient):
             usage_ledger=usage_ledger,
             input_cost_per_million=config.input_cost_per_million,
             output_cost_per_million=config.output_cost_per_million,
+            cache_read_cost_per_million=config.cache_read_cost_per_million,
+            cache_write_cost_per_million=config.cache_write_cost_per_million,
         )
         self.model = config.model
         self.max_output_tokens = config.get_max_output_tokens()
@@ -564,7 +572,9 @@ class OpenAIClient(LLMClient):
                     raise LLMError(f"Responses API failed: {message}")
 
             if not terminal_emitted:
-                raise NetworkError("Responses API stream ended without a terminal event")
+                # 协议级异常（流正常结束但缺少终止事件）与网络错误性质不同，
+                # 用 LLMError 区分，避免上层重试逻辑将 API 不兼容当作临时网络抖动（C-4）
+                raise LLMError("Responses API stream ended without a terminal event")
 
         except _openai.AuthenticationError as e:
             raise AuthenticationError(f"Invalid API key: {e}") from e
@@ -600,6 +610,8 @@ class OpenAICompatClient(LLMClient):
             usage_ledger=usage_ledger,
             input_cost_per_million=config.input_cost_per_million,
             output_cost_per_million=config.output_cost_per_million,
+            cache_read_cost_per_million=config.cache_read_cost_per_million,
+            cache_write_cost_per_million=config.cache_write_cost_per_million,
         )
         self.model = config.model
         self.max_output_tokens = config.get_max_output_tokens()

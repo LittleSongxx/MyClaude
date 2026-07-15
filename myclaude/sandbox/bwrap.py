@@ -11,11 +11,14 @@
 
 from __future__ import annotations
 
+import logging
 import shlex
 import shutil
 from pathlib import Path
 
 from myclaude.sandbox import Sandbox, SandboxConfig
+
+log = logging.getLogger(__name__)
 
 
 class BwrapSandbox(Sandbox):
@@ -48,8 +51,15 @@ class BwrapSandbox(Sandbox):
             args.extend(["--bind", resolved, resolved])
 
         # 禁写路径：用 --ro-bind 强制只读（覆盖上面的 --bind）
+        # 注意：bwrap 中后挂载的路径优先，因此 deny_write 必须在 allow_write 之后。
+        # 若路径不存在，bwrap --ro-bind 会报错导致整个沙箱启动失败，跳过并记录警告。
         for path in config.deny_write:
             resolved = str(Path(path).resolve())
+            if not Path(resolved).exists():
+                log.warning(
+                    "bwrap: deny_write path does not exist, skipping: %s", resolved
+                )
+                continue
             args.extend(["--ro-bind", resolved, resolved])
 
         # 网络隔离

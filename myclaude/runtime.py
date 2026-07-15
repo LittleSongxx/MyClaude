@@ -7,7 +7,7 @@ from myclaude.agent import Agent
 from myclaude.client import LLMClient, create_client
 from myclaude.config import ProviderConfig, SandboxAppConfig, WorktreeConfig
 from myclaude.hooks import HookEngine
-from myclaude.memory import MemoryManager, load_instructions
+from myclaude.memory import MemoryManager, load_instructions, make_recall_fn
 from myclaude.permissions import (
     DangerousCommandDetector,
     PathSandbox,
@@ -81,6 +81,17 @@ def configure_os_sandbox(
     if bash_tool is None:
         return False
     bash_tool.sandbox = os_sandbox
+    # 构建用户级全局配置路径列表（Path.home() 在无 HOME 的环境可能抛 RuntimeError）
+    try:
+        _home = Path.home()
+        _user_deny = [
+            str(_home / ".myclaude" / "config.yaml"),
+            str(_home / ".myclaude" / "config.local.yaml"),
+            str(_home / ".myclaude" / "permissions.yaml"),
+            str(_home / ".myclaude" / "permissions.local.yaml"),
+        ]
+    except RuntimeError:
+        _user_deny = []
     bash_tool.sandbox_config = SandboxConfig(
         allow_write=[root, "/tmp"],
         deny_write=[
@@ -89,6 +100,8 @@ def configure_os_sandbox(
             f"{root}/.myclaude/permissions.yaml",
             f"{root}/.myclaude/permissions.local.yaml",
             f"{root}/.myclaude/skills",
+            # 用户级全局配置也必须保护：沙箱内 bash 命令不应能修改 API key 或全局权限（F-3）
+            *_user_deny,
         ],
         network_enabled=sandbox_config.network_enabled,
     )
@@ -109,6 +122,7 @@ def build_core_runtime(
     worktree_enabled: bool = True,
     workspace_trusted: bool = True,
     run_limits: RunLimits | None = None,
+    allow_long_term_memory: bool = False,
 ) -> CoreRuntime:
     """Build the shared agent kernel used by TUI, headless and remote modes."""
     root = str(Path(work_dir).expanduser().resolve())
@@ -122,7 +136,20 @@ def build_core_runtime(
         sandbox_active=sandbox_active,
         workspace_trusted=workspace_trusted,
     )
-    memory_manager = MemoryManager(root) if memory_enabled and workspace_trusted else None
+    memory_manager = (
+        MemoryManager(root, allow_long_term=allow_long_term_memory)
+        if memory_enabled and workspace_trusted
+        else None
+    )
+    # 动态召回收敛到共享 Runtime：三入口（TUI / Headless / Remote）都经由
+    # build_core_runtime，因此注入一次即可让召回语义一致。side client 复用主
+    # client 的 usage 账本。TUI 仍可用自己的 prefetch 抢先设置 memory_recall_task，
+    # Agent 检测到已设置就不重复启动（见 Agent._maybe_start_recall）。
+    recall_fn = (
+        make_recall_fn(provider, memory_manager, ledger_source=client)
+        if memory_manager is not None
+        else None
+    )
     agent = Agent(
         client=client,
         registry=registry,
@@ -134,6 +161,7 @@ def build_core_runtime(
         memory_manager=memory_manager,
         hook_engine=hook_engine,
         run_limits=run_limits,
+        recall_fn=recall_fn,
     )
 
     worktree_manager: WorktreeManager | None = None

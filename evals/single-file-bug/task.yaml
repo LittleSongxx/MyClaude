@@ -1,0 +1,16 @@
+id: single-file-bug
+description: |
+  一个单文件逻辑 bug：running_total 在负数分支漏加。要求定位并修复 source，
+  不得修改测试文件。这是最基础的"定位 + 修复"能力检验。
+prompt: |
+  tests/test_ledger.py 里的 test_balance_with_refunds 失败了。
+  ledger.py 的 running_balance 计算在处理退款（负数金额）时结果不对。
+  请修复 ledger.py，让所有测试通过。不要修改测试文件。
+
+test_target: tests/test_ledger.py
+# 只允许改源码，不许动测试。
+diff_whitelist:
+  - ledger.py
+# 保护测试文件：改测试来"通过"视为作弊。
+protected:
+  - tests/test_ledger.py

@@ -35,9 +35,8 @@ class SkillExecutor:
 
     def execute_inline(self, skill: SkillDef, args: str) -> None:
         prompt = substitute_arguments(skill.prompt_body, args)
+        # activate_skill 内部已统一记录 recovery_state，无需在此重复记录。
         self.agent.activate_skill(skill.name, prompt)
-        if getattr(self.agent, "recovery_state", None) is not None:
-            self.agent.recovery_state.record_skill_invocation(skill.name, prompt)
 
 
     async def execute_fork(

@@ -108,7 +108,7 @@ def main() -> None:
         root = trust_manager.status(Path.cwd()).root
         answer = input(
             f"Trust workspace {root}? Project configuration can execute MCP servers "
-            "and Hooks. Type 'yes' to trust: "
+            "and Hooks. Type 'yes' or 'y' to trust: "
         ).strip().lower()
         if answer not in {"y", "yes"}:
             print("Workspace not trusted; exiting.", file=sys.stderr)
@@ -149,7 +149,7 @@ def main() -> None:
 
     if args.p is not None:
         output_format = getattr(args, "output_format", "text")
-        asyncio.run(
+        exit_code = asyncio.run(
             _run_prompt(
                 config,
                 permission_mode,
@@ -159,6 +159,9 @@ def main() -> None:
                 workspace_trusted=workspace_trusted,
             )
         )
+        # 明确的退出契约：出错（含运行限制）返回非零码，方便脚本/CI 判定。
+        if exit_code:
+            sys.exit(exit_code)
         return
 
     # Remote 模式：启动 WebSocket 服务器，浏览器访问 http://localhost:18888
@@ -213,7 +216,7 @@ async def _run_prompt(
     output_format: str = "text",
     *,
     workspace_trusted: bool = True,
-) -> None:
+) -> int:
     from myclaude.agent import (
         CompactNotification,
         ErrorEvent,
@@ -284,10 +287,10 @@ async def _run_prompt(
         notes.extend(team_manager.drain_lead_mailbox())
         return notes
 
-    def drain_mailbox_only() -> list[str]:
-        return team_manager.drain_lead_mailbox()
-
-    agent.notification_fn = drain_mailbox_only
+    # 三入口一致：绑定完整 drainer（含后台子 Agent 完成通知 + Team mailbox），
+    # 而非只读 mailbox。否则 Headless 下后台子 Agent 完成后其结果永远不会经由
+    # notification_fn 回流给模型，与工具描述"完成后自动通知"不符。
+    agent.notification_fn = drain_notifications
 
     # 使用事件驱动的 agent.run()，支持 text 和 stream-json 两种输出格式
     conv = ConversationManager()
@@ -300,6 +303,11 @@ async def _run_prompt(
     total_input = 0
     total_output = 0
     tool_calls: list[dict] = []
+    # 退出契约：Headless 供脚本调用，必须给出稳定的 stop_reason 与退出码。
+    # 正常完成 -> "end_turn" / 退出码 0；运行限制或致命错误 -> 对应 stop_reason
+    # 与退出码 1。这样调用方无需解析文本即可判断成败。
+    stop_reason = "end_turn"
+    last_error = ""
 
     async for event in agent.run(conv):
         if isinstance(event, StreamText):
@@ -351,6 +359,7 @@ async def _run_prompt(
 
         elif isinstance(event, LoopComplete):
             # 最终结果：stream-json 输出 result 行，text 模式直接打印文本
+            stop_reason = "end_turn"
             elapsed_ms = int((time.monotonic() - start) * 1000)
             if is_json:
                 emit_json({
@@ -370,10 +379,17 @@ async def _run_prompt(
             break
 
         elif isinstance(event, ErrorEvent):
+            last_error = event.message
+            # 运行限制类错误归一到 "run_limit"，其余归到 "error"，便于调用方分类。
+            stop_reason = (
+                "run_limit" if "run limit exceeded" in event.message else "error"
+            )
             if is_json:
                 emit_json({"type": "error", "message": event.message})
             else:
                 print(f"Error: {event.message}", file=sys.stderr, flush=True)
+            # 发生错误后立即停止事件循环，避免继续对失败状态发起后续 LLM 请求（C-3）
+            break
 
         elif isinstance(event, CompactNotification):
             if is_json:
@@ -389,22 +405,34 @@ async def _run_prompt(
             # with --mode bypassPermissions.
             event.future.set_result(PermissionResponse.DENY)
 
-    # 如果有 team 在运行，轮询等待 teammate 完成
-    if not team_manager._teams:
+    async def _finalize(code: int) -> int:
+        """统一收尾：drain 在途异步 hook、关闭 MCP，返回退出码。
+
+        让 Headless 有明确的退出契约——后台副作用要么完成、要么被显式取消，
+        而不是随 asyncio.run() 关闭被静默丢弃。
+        """
+        if hook_engine is not None:
+            await hook_engine.drain_async_hooks(timeout=5.0)
         if mcp_features.manager is not None:
             await mcp_features.manager.shutdown()
-        return
+        return code
 
-    for i in range(90):
+    # 无 Team 时，仍可能有经 AgentTool 启动的后台子 Agent。此前主循环一结束就
+    # 直接 return，这些任务会随 asyncio.run() 关闭被静默取消（可能留下半写文件）。
+    # 现在显式 drain：给一个有界预算等它们收尾，并把完成通知回流给调用方。
+    if not team_manager._teams:
+        await task_manager.drain(timeout=30.0)
+        for note in drain_notifications():
+            if is_json:
+                emit_json({"type": "task_notification", "note": note})
+        return await _finalize(1 if last_error else 0)
+
+    for _ in range(90):
         await asyncio.sleep(2)
-        running = {k: not t.done() for k, t in task_manager._async_tasks.items()}
-        completed_ids = [t.id for t in task_manager._tasks.values() if t.status != "running"]
-        print(f"[poll {i}] running={running} completed={completed_ids} teams={list(team_manager._teams.keys())} queue_size={task_manager._notify_queue.qsize()}", file=sys.stderr, flush=True)
+        running = any(not t.done() for t in task_manager._async_tasks.values())
         notes = drain_notifications()
         if not notes:
-            has_running = any(v for v in running.values())
-            if not has_running:
-                print(f"[poll {i}] no running tasks, breaking", file=sys.stderr, flush=True)
+            if not running:
                 break
             continue
         for note in notes:
@@ -418,8 +446,7 @@ async def _run_prompt(
         else:
             print(last_result, flush=True)
 
-    if mcp_features.manager is not None:
-        await mcp_features.manager.shutdown()
+    return await _finalize(1 if last_error else 0)
 
 
 if __name__ == "__main__":

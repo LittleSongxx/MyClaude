@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 from contextlib import nullcontext
@@ -39,6 +40,17 @@ _PROJECT_LEVEL_TYPES = {"project", "reference"}
 MAX_ENTRYPOINT_LINES = 200
 MAX_ENTRYPOINT_BYTES = 25_000
 
+# 每个记忆目录的 MEMORY.md 索引写锁：防止并行子 Agent 并发写入时相互覆盖
+_MEMORY_INDEX_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def _get_index_lock(dir_path: str) -> asyncio.Lock:
+    """返回指定目录对应的 asyncio.Lock（首次访问时懒创建）。"""
+    if dir_path not in _MEMORY_INDEX_LOCKS:
+        _MEMORY_INDEX_LOCKS[dir_path] = asyncio.Lock()
+    return _MEMORY_INDEX_LOCKS[dir_path]
+
+
 # frontmatter 正则
 _FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 _SAFE_MEMORY_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
@@ -46,6 +58,14 @@ _SENSITIVE_MEMORY_PATTERNS = (
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
     re.compile(r"\b(?:api[_-]?key|password|passwd|secret|access[_-]?token)\s*[:=]\s*\S+", re.I),
     re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"),
+    # GitHub personal access tokens (classic: ghp_, fine-grained: github_pat_, server: ghs_)
+    re.compile(r"\b(ghp_|ghs_|gho_|ghu_|github_pat_)[A-Za-z0-9_]{16,}"),
+    # AWS access key IDs
+    re.compile(r"\bAKIA[A-Z0-9]{16}\b"),
+    # GCP service account JSON key fields
+    re.compile(r'"private_key"\s*:\s*"-----BEGIN'),
+    # Generic high-entropy base64 tokens (≥40 chars, only base64 chars, looks like a secret value)
+    re.compile(r'(?:key|token|secret|credential|auth)["\']?\s*[:=]\s*["\']?[A-Za-z0-9+/=_-]{40,}', re.I),
 )
 
 
@@ -315,7 +335,7 @@ class MemoryManager:
     此类提供系统提示构建和 /memory 斜杠命令支持。
     """
 
-    def __init__(self, project_root: str) -> None:
+    def __init__(self, project_root: str, *, allow_long_term: bool = False) -> None:
         abs_root = os.path.abspath(project_root)
         self._project_root = abs_root
         # 用户级：~/.myclaude/memory/ — user/feedback 类型记忆
@@ -323,6 +343,10 @@ class MemoryManager:
         # 项目级：<projectRoot>/.myclaude/memory/ — project/reference 类型记忆
         self._mem_dir = get_auto_mem_path(abs_root)
         self._last_extraction_msg_count = 0
+        # 报告 B3：长期跨项目记忆（user/feedback）默认 opt-in。默认只自动提取项目级
+        # 会话状态；跨项目用户记忆需显式开启，避免模型自作主张把内容长期写入用户目录、
+        # 也避免每轮固定的用户记忆写入成本。项目级记忆不受此限。
+        self._allow_long_term = allow_long_term
 
     @property
     def user_path(self) -> Path:
@@ -510,6 +534,11 @@ class MemoryManager:
             if _contains_sensitive_data(f"{desc}\n{body}"):
                 continue
 
+            # 长期（跨项目）用户级记忆默认 opt-in：未开启时只保存项目会话状态，
+            # 不把内容写进跨项目的 ~/.myclaude/memory/，避免默认就由模型决定长期
+            # 保留什么、并在项目间泄漏（报告 B3）。项目级 project/reference 不受限。
+            if mtype in _USER_LEVEL_TYPES and not self._allow_long_term:
+                continue
             # 路由到正确的目录
             target_dir = self._user_mem_dir if mtype in _USER_LEVEL_TYPES else self._mem_dir
             if not target_dir:
@@ -523,13 +552,15 @@ class MemoryManager:
             except OSError:
                 continue
 
-            # 更新 MEMORY.md 索引
+            # 更新 MEMORY.md 索引：持有锁后再做 read-modify-write，防止并行子 Agent
+            # 并发提取时相互覆盖对方写入的索引行（C-5）
             idx_path = Path(target_dir) / ENTRYPOINT_NAME
             idx_line = f"- [{name}]({name}.md) — {desc}\n"
             try:
-                existing = idx_path.read_text(encoding="utf-8") if idx_path.exists() else ""
-                if f"{name}.md" not in existing:
-                    atomic_write_text(idx_path, existing + idx_line)
+                async with _get_index_lock(target_dir):
+                    existing = idx_path.read_text(encoding="utf-8") if idx_path.exists() else ""
+                    if f"{name}.md" not in existing:
+                        atomic_write_text(idx_path, existing + idx_line)
             except OSError:
                 pass
 

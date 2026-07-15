@@ -109,6 +109,25 @@ def validate_providers(raw_providers: list) -> list[dict]:
                 )
             costs[field_name] = float(value)
 
+        # 缓存单价可选：省略时为 None，UsageLedger 会回退到 input 单价。
+        # 显式配置时才校验为非负有限数。
+        cache_costs: dict[str, float | None] = {}
+        for field_name in ("cache_read_cost_per_million", "cache_write_cost_per_million"):
+            if field_name not in entry:
+                cache_costs[field_name] = None
+                continue
+            value = entry.get(field_name)
+            if (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or value < 0
+                or not math.isfinite(float(value))
+            ):
+                raise ConfigError(
+                    f"Provider #{i + 1}: {field_name} must be a non-negative number"
+                )
+            cache_costs[field_name] = float(value)
+
         providers.append(
             {
                 "name": entry["name"],
@@ -120,6 +139,7 @@ def validate_providers(raw_providers: list) -> list[dict]:
                 "context_window": context_window,
                 "max_output_tokens": max_output_tokens,
                 **costs,
+                **cache_costs,
             }
         )
 

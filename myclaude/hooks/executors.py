@@ -17,7 +17,8 @@ log = logging.getLogger(__name__)
 
 
 async def execute_command(action: Action, ctx: HookContext) -> ActionResult:
-    command = ctx.expand(action.command)
+    # 使用 shell_safe_expand 对 LLM 工具参数做 shlex.quote 转义，防止 shell 注入
+    command = ctx.shell_safe_expand(action.command)
     try:
         payload = json.dumps(ctx.to_dict(), ensure_ascii=False)
         env = os.environ.copy()

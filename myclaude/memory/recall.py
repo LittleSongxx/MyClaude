@@ -4,13 +4,15 @@
 # 简历模版：jianli.xiaolinnote.com
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 
 # ---------------------------------------------------------------------------
@@ -355,3 +357,79 @@ def render_reminder(memories: list[RelevantMemory]) -> str:
             parts.append(note + "\n")
         parts.append(content + "\n\n---\n")
     return "\n".join(parts)
+
+
+log = logging.getLogger(__name__)
+
+# 召回等待预算：召回是尽力而为，绝不能长期阻塞首个 token。超时即放弃本轮召回。
+DEFAULT_RECALL_TIMEOUT = 8.0
+
+
+def make_recall_fn(
+    provider: Any,
+    memory_manager: Any,
+    *,
+    ledger_source: Any = None,
+    timeout: float = DEFAULT_RECALL_TIMEOUT,
+) -> Callable[[str], Awaitable[str]]:
+    """构造共享的召回闭包 ``(query) -> reminder_body``。
+
+    此前动态召回只在 TUI 入口用 ``_prefetch_relevant_memories`` 启动，Headless /
+    Remote 完全没有这条链路，导致同一 prompt 在不同入口召回行为不一致。把召回
+    逻辑收敛成一个入口无关的工厂，由共享 Runtime 注入 Agent，三入口即可获得一致
+    的召回语义。
+
+    闭包完全尽力而为：provider / memory_manager 缺失、selector 失败或超时，都返回
+    空串，绝不抛异常、绝不长期阻塞主对话。``ledger_source`` 用于把召回的 side
+    client 计入同一 usage 账本（None 时新建独立账本）。
+    """
+
+    async def recall(query: str) -> str:
+        if memory_manager is None or provider is None or not query:
+            return ""
+
+        # 延迟 import，避免 recall.py 与 client/conversation 形成模块级循环依赖。
+        from myclaude.client import create_client
+        from myclaude.conversation import ConversationManager, Message
+        from myclaude.tools.base import StreamEnd, TextDelta
+
+        user_dir = memory_manager.user_mem_dir
+        project_dir = memory_manager.project_mem_dir
+
+        async def selector(system_prompt: str, user_message: str) -> str:
+            ledger = getattr(ledger_source, "usage_ledger", None)
+            side_client = create_client(provider, usage_ledger=ledger)
+            mini_conv = ConversationManager()
+            mini_conv.history = [Message(role="user", content=user_message)]
+            collected = ""
+            with side_client.usage_scope("memory-recall"):
+                async for event in side_client.stream(
+                    mini_conv, system=system_prompt
+                ):
+                    if isinstance(event, TextDelta):
+                        collected += event.text
+                    elif isinstance(event, StreamEnd):
+                        pass
+            return collected
+
+        try:
+            results = await asyncio.wait_for(
+                find_relevant_memories(
+                    query=query,
+                    user_mem_dir=user_dir,
+                    project_mem_dir=project_dir,
+                    recent_tools=None,
+                    already_surfaced=None,
+                    selector=selector,
+                ),
+                timeout=timeout,
+            )
+            return render_reminder(results)
+        except asyncio.TimeoutError:
+            log.debug("Memory recall timed out after %.1fs", timeout)
+            return ""
+        except Exception as exc:  # 尽力而为：任何失败都不影响主对话
+            log.debug("Memory recall failed: %s", exc)
+            return ""
+
+    return recall

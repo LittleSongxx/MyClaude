@@ -270,6 +270,49 @@ second line
     assert "first line\nsecond line" in content
 
 
+_MIXED_MEMORY_RESPONSE = """MEMORY_NAME: project-convention
+MEMORY_TYPE: project
+MEMORY_DESC: durable project rule
+MEMORY_BODY: always use spaces
+---
+MEMORY_NAME: user-preference
+MEMORY_TYPE: user
+MEMORY_DESC: cross-project user pref
+MEMORY_BODY: prefers concise output
+---
+"""
+
+
+@pytest.mark.asyncio
+async def test_long_term_memory_is_opt_in_by_default(tmp_path: Path) -> None:
+    """B3：默认只写项目级记忆，跨项目用户级记忆需 opt-in。"""
+    manager = MemoryManager(str(tmp_path / "project"))  # allow_long_term 默认 False
+    manager._user_mem_dir = str(tmp_path / "user")
+    conversation = ConversationManager()
+    conversation.add_user_message("remember these")
+
+    await manager.extract(DummyClient(_MIXED_MEMORY_RESPONSE), conversation, "anthropic")
+
+    # 项目级记忆照常写入
+    assert (manager.project_mem_dir / "project-convention.md").exists()
+    # 用户级（跨项目）记忆被 opt-in 挡下，不写入
+    assert not (Path(manager._user_mem_dir) / "user-preference.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_long_term_memory_written_when_opted_in(tmp_path: Path) -> None:
+    """B3：显式开启 allow_long_term 后，用户级记忆才写入。"""
+    manager = MemoryManager(str(tmp_path / "project"), allow_long_term=True)
+    manager._user_mem_dir = str(tmp_path / "user")
+    conversation = ConversationManager()
+    conversation.add_user_message("remember these")
+
+    await manager.extract(DummyClient(_MIXED_MEMORY_RESPONSE), conversation, "anthropic")
+
+    assert (manager.project_mem_dir / "project-convention.md").exists()
+    assert (Path(manager._user_mem_dir) / "user-preference.md").exists()
+
+
 def test_missing_session_metadata_returns_none(tmp_path: Path) -> None:
     assert SessionMeta.load(tmp_path / "missing.meta") is None
 

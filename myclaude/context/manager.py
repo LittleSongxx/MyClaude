@@ -4,8 +4,10 @@
 # 简历模版：jianli.xiaolinnote.com
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import shutil
 import threading
 import time
@@ -246,15 +248,44 @@ def referenced_persisted_paths(
 # Layer 1：大型工具结果落盘
 # ---------------------------------------------------------------------------
 
+_SAFE_TOOL_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,120}$")
+
+
+def _safe_spill_stem(tool_use_id: str) -> str:
+    """把 provider 返回的 tool_use_id 映射成安全的文件名 stem。
+
+    tool_use_id 来自 provider（Anthropic/OpenAI 的 ``toolu_...`` / ``call_...``），
+    兼容 provider 不一定遵守该格式，恶意或异常 ID 可能含路径分隔符或 ``..``，
+    直接拼进路径会导致目录穿越（``..``）或绝对路径覆盖。
+
+    合法 ID 原样保留（便于调试、并与历史文件名兼容）；任何不匹配安全模式的 ID
+    退化为 ``sha256`` 摘要，映射保持确定性——因为 ``O_EXCL`` 幂等依赖同一 ID
+    始终映射到同一文件。
+    """
+    if _SAFE_TOOL_ID_RE.match(tool_use_id):
+        return tool_use_id
+    digest = hashlib.sha256(tool_use_id.encode("utf-8")).hexdigest()
+    return f"spill-{digest[:32]}"
+
+
 def persist_tool_result(tool_use_id: str, content: str, session_dir: Path) -> Path:
-    file_path = session_dir / f"{tool_use_id}.txt"
+    file_path = session_dir / f"{_safe_spill_stem(tool_use_id)}.txt"
+    # 纵深防御：即便 stem 逻辑有疏漏，也不允许最终路径逃出 session_dir。
+    resolved = file_path.resolve()
     try:
-        fd = os.open(str(file_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+        resolved.relative_to(session_dir.resolve())
+    except ValueError:
+        raise ValueError(
+            f"refusing to persist tool result outside session dir: {tool_use_id!r}"
+        ) from None
+    try:
+        # 0o600：工具结果可能含敏感内容，仅所有者可读写。
+        fd = os.open(str(resolved), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(content)
     except FileExistsError:
         pass
-    return file_path
+    return resolved
 
 
 def make_persisted_preview(content: str, file_path: Path) -> str:
@@ -413,90 +444,54 @@ CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.
 - Tool calls will be REJECTED and will waste your only turn — you will fail the task.
 - Your entire response must be plain text: an <analysis> block followed by a <summary> block.
 
-Your task is to create a detailed summary of the conversation so far, paying close attention to the user's explicit requests and your previous actions.
-This summary should be thorough in capturing technical details, code patterns, and architectural decisions that would be essential for continuing development work without losing context.
+You are compacting a coding session so it can continue without losing context.
+Capture the TASK STATE, not a chat transcript. The goal is that after this summary
+replaces the earlier conversation, you can resume the work correctly, honor every
+constraint, and NOT repeat work already done or mistakes already made.
 
-Before providing your final summary, wrap your analysis in <analysis> tags to organize your thoughts and ensure you've covered all necessary points. In your analysis process:
+Do NOT reproduce full file contents or long code blocks — those can be re-read from
+disk. Record WHERE things are (paths, line ranges, symbol names) and WHY, not their
+full bytes. Prefer decisions and outcomes over a message-by-message replay.
 
-1. Chronologically analyze each message and section of the conversation. For each section thoroughly identify:
-   - The user's explicit requests and intents
-   - Your approach to addressing the user's requests
-   - Key decisions, technical concepts and code patterns
-   - Specific details like:
-     - file names
-     - full code snippets
-     - function signatures
-     - file edits
-   - Errors that you ran into and how you fixed them
-   - Pay special attention to specific user feedback that you received, especially if the user told you to do something differently.
-2. Double-check for technical accuracy and completeness, addressing each required element thoroughly.
-
-After your analysis, output your final summary wrapped in <summary> tags. Your summary should include the following sections:
-
-1. Primary Request and Intent: Capture all of the user's explicit requests and intents in detail
-2. Key Technical Concepts: List all important technical concepts, technologies, and frameworks discussed.
-3. Files and Code Sections: Enumerate specific files and code sections examined, modified, or created. Pay special attention to the most recent messages and include full code snippets where applicable and include a summary of why this file read or edit is important.
-4. Errors and fixes: List all errors that you ran into, and how you fixed them. Pay special attention to specific user feedback that you received, especially if the user told you to do something differently.
-5. Problem Solving: Document problems solved and any ongoing troubleshooting efforts.
-6. All user messages: List ALL user messages that are not tool results. These are critical for understanding the users' feedback and changing intent.
-7. Pending Tasks: Outline any pending tasks that you have explicitly been asked to work on.
-8. Current Work: Describe in detail precisely what was being worked on immediately before this summary request, paying special attention to the most recent messages from both user and assistant. Include file names and code snippets where applicable.
-9. Optional Next Step: List the next step that you will take that is related to the most recent work you were doing. IMPORTANT: ensure that this step is DIRECTLY in line with the user's most recent explicit requests, and the task you were working on immediately before this summary request. If your last task was concluded, then only list next steps if they are explicitly in line with the users request. Do not start on tangential requests or really old requests that were already completed without confirming with the user first.
-   If there is a next step, include direct quotes from the most recent conversation showing exactly what task you were working on and where you left off. This should be verbatim to ensure there's no drift in task interpretation.
-
-Output structure:
+First, in <analysis> tags, briefly think through: what the user ultimately wants,
+which constraints are non-negotiable, what has actually changed on disk, what was
+verified, and what remains. Then write the <summary> using EXACTLY these sections:
 
 <analysis>
-[Your thought process, ensuring all points are covered thoroughly and accurately]
+[Your brief reasoning — what matters for resuming, what can be dropped.]
 </analysis>
 
 <summary>
-1. Primary Request and Intent:
-   [Detailed description]
+## Goal
+The user's ultimate objective, in one or two sentences.
 
-2. Key Technical Concepts:
-   - [Concept 1]
-   - [Concept 2]
-   - [...]
+## User Constraints
+Explicit rules the user gave that must not be violated (e.g. "don't modify tests",
+"don't touch prod config", preferred libraries/style). Include corrections the user
+made mid-task — these override earlier assumptions.
 
-3. Files and Code Sections:
-   - [File Name 1]
-      - [Summary of why this file is important]
-      - [Summary of the changes made to this file, if any]
-      - [Important Code Snippet]
-   - [File Name 2]
-      - [Important Code Snippet]
-   - [...]
+## Decisions
+Key technical decisions and their rationale (approach chosen, why alternatives were
+rejected). One line each.
 
-4. Errors and fixes:
-    - [Detailed description of error 1]:
-      - [How you fixed the error]
-      - [User feedback on the error if any]
-    - [...]
+## Files Changed
+Files created/edited/deleted so far, with a one-line note of what changed and why.
+Paths only — do not paste file contents.
 
-5. Problem Solving:
-   [Description of solved problems and ongoing troubleshooting]
+## Verification
+Tests/commands already run and their results (pass/fail). What is confirmed working
+vs. still unverified.
 
-6. All user messages:
-    - [Detailed non tool use user message]
-    - [...]
+## Failed Attempts
+Approaches already tried that did NOT work, and why — so they are not repeated.
 
-7. Pending Tasks:
-   - [Task 1]
-   - [Task 2]
-   - [...]
+## Open Questions
+Unresolved questions or ambiguities, including anything awaiting user input.
 
-8. Current Work:
-   [Precise description of current work]
-
-9. Optional Next Step:
-   [Optional Next step to take]
-
+## Next Action
+The single most concrete next step to take on resuming.
 </summary>
-
-Please provide your summary based on the conversation so far, following this structure and ensuring precision and thoroughness in your response.
-
-REMINDER: Do NOT call any tools. Respond with plain text only — an <analysis> block followed by a <summary> block. Tool calls will be rejected and you will fail the task."""
+"""
 
 
 def extract_summary(llm_output: str) -> str:
@@ -536,6 +531,57 @@ RECOVERY_TOKENS_PER_FILE = 5_000
 RECOVERY_SKILLS_BUDGET = 25_000
 RECOVERY_TOKENS_PER_SKILL = 5_000
 _RECOVERY_CHARS_PER_TOKEN = 3.5
+
+# 达到此窗口即视为"够大"，沿用上面的固定慷慨预算（对齐既有行为与测试）。
+RECOVERY_FULL_BUDGET_WINDOW = 100_000
+# 小窗口下，整个恢复附件占窗口的比例上限（1/RECOVERY_ATTACHMENT_WINDOW_DIVISOR）。
+# 附件只是"提示模型重读"，不该反过来吃掉大部分预算。
+RECOVERY_ATTACHMENT_WINDOW_DIVISOR = 8
+
+
+@dataclass(frozen=True)
+class RecoveryBudget:
+    """压缩后恢复附件各部分的预算。
+
+    报告 B5：压缩**触发线**已随 context_window 缩放（compute_compact_threshold），
+    但恢复附件的大小此前是固定常量。对用户显式配置的 8k/16k 本地模型，固定附件
+    （文件快照 ~25k + skills ~25k）本身就可能再次撑爆窗口。这里让附件预算也随窗口
+    缩放：大窗口/未知窗口沿用固定值，小窗口按比例收紧并设硬下限。
+    """
+
+    file_limit: int
+    tokens_per_file: int
+    skills_budget: int
+    tokens_per_skill: int
+
+
+def compute_recovery_budget(context_window: int) -> RecoveryBudget:
+    """按 context_window 计算恢复附件预算。
+
+    大窗口（>= RECOVERY_FULL_BUDGET_WINDOW）或未知窗口（<= 0）返回固定慷慨预算，
+    保持既有行为不变；小窗口把整个附件限制在窗口的约 1/8 内，files 与 skills 六四分，
+    并保证每部分至少留一点有意义的额度（不缩到 0）。
+    """
+    default = RecoveryBudget(
+        file_limit=RECOVERY_FILE_LIMIT,
+        tokens_per_file=RECOVERY_TOKENS_PER_FILE,
+        skills_budget=RECOVERY_SKILLS_BUDGET,
+        tokens_per_skill=RECOVERY_TOKENS_PER_SKILL,
+    )
+    if context_window <= 0 or context_window >= RECOVERY_FULL_BUDGET_WINDOW:
+        return default
+
+    attachment_cap = max(2_000, context_window // RECOVERY_ATTACHMENT_WINDOW_DIVISOR)
+    files_cap = int(attachment_cap * 0.6)
+    skills_cap = attachment_cap - files_cap
+    file_limit = max(1, min(RECOVERY_FILE_LIMIT, files_cap // 500))
+    tokens_per_file = max(500, files_cap // file_limit)
+    return RecoveryBudget(
+        file_limit=file_limit,
+        tokens_per_file=tokens_per_file,
+        skills_budget=max(500, skills_cap),
+        tokens_per_skill=max(500, min(RECOVERY_TOKENS_PER_SKILL, skills_cap)),
+    )
 
 
 @dataclass
@@ -624,22 +670,32 @@ def _first_line(s: str) -> str:
 def build_recovery_attachment(
     state: RecoveryState | None,
     tool_schemas: list[Mapping[str, Any]] | None,
+    budget: RecoveryBudget | None = None,
 ) -> str:
     """渲染压缩后附件的四个小节。
 
     没有任何值得附加的内容时返回 ""，让调用方保持摘要消息干净。
     `tool_schemas` 应当是 agent 在下一次请求中将要发送的 schema —— 这里用其中的
     名称和描述来提醒模型当前都接入了哪些工具。
+    `budget` 缺省时用固定慷慨预算（大窗口行为不变）；小窗口由 auto_compact 传入
+    按 context_window 缩放后的预算，避免附件本身撑爆窗口（报告 B5）。
     """
+    if budget is None:
+        budget = RecoveryBudget(
+            file_limit=RECOVERY_FILE_LIMIT,
+            tokens_per_file=RECOVERY_TOKENS_PER_FILE,
+            skills_budget=RECOVERY_SKILLS_BUDGET,
+            tokens_per_skill=RECOVERY_TOKENS_PER_SKILL,
+        )
     sections: list[str] = []
 
     if state is not None:
-        files = state.snapshot_files(RECOVERY_FILE_LIMIT)
+        files = state.snapshot_files(budget.file_limit)
         if files:
             buf = ["## 最近读过的文件\n",
                    "以下快照是文件读取工具上次返回的内容。如需当前字节请重新读取。\n"]
             for rec in files:
-                content = _truncate_by_tokens(rec.content, RECOVERY_TOKENS_PER_FILE)
+                content = _truncate_by_tokens(rec.content, budget.tokens_per_file)
                 ts = time.strftime(
                     "%Y-%m-%dT%H:%M:%SZ", time.gmtime(rec.timestamp)
                 )
@@ -658,9 +714,9 @@ def build_recovery_attachment(
             used = 0
             emitted = False
             for sk in skills:
-                body = _truncate_by_tokens(sk.body, RECOVERY_TOKENS_PER_SKILL)
+                body = _truncate_by_tokens(sk.body, budget.tokens_per_skill)
                 tokens = _approx_tokens(body) + _approx_tokens(sk.name) + 8
-                if used + tokens > RECOVERY_SKILLS_BUDGET:
+                if used + tokens > budget.skills_budget:
                     break
                 used += tokens
                 buf.append(f"### {sk.name}\n\n{body}\n")
@@ -981,7 +1037,12 @@ async def auto_compact(
         if breaker is not None:
             breaker.record_failure()
         return "摘要生成失败：模型返回了空摘要"
-    attachment = build_recovery_attachment(recovery, tool_schemas)
+    # 恢复附件预算随 context_window 缩放：小窗口模型（用户显式配置的 8k/16k）
+    # 用固定 50k 附件会当场溢出。compute_recovery_budget 对大/未知窗口回退到
+    # 原固定常量，对小窗口按比例收紧。
+    attachment = build_recovery_attachment(
+        recovery, tool_schemas, budget=compute_recovery_budget(context_window)
+    )
     # 重建 = 摘要(user) + 尾部原文。
     new_messages = build_compact_messages(
         summary,

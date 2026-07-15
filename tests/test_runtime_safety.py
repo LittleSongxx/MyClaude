@@ -366,6 +366,45 @@ def test_usage_ledger_accounts_secondary_purposes_and_cost() -> None:
     assert snapshot.estimated_cost_usd == pytest.approx(0.0005)
 
 
+def test_usage_ledger_defaults_cache_rates_to_input() -> None:
+    # 未配置缓存单价时，cache read/write 回退到 input 单价（保持旧行为）。
+    ledger = UsageLedger(
+        input_cost_per_million=2.0,
+        output_cost_per_million=10.0,
+    )
+    ledger.record(
+        input_tokens=100,
+        output_tokens=20,
+        cache_read=50,
+        cache_creation=40,
+    )
+    snapshot = ledger.snapshot()
+    # (100 + 50 + 40) * 2.0 + 20 * 10.0 = 380 + 200 = 580 → 0.00058
+    assert snapshot.estimated_cost_usd == pytest.approx(0.00058)
+
+
+def test_usage_ledger_applies_distinct_cache_rates() -> None:
+    # 显式配置后，cache read 便宜、cache write 更贵，各走各的单价，
+    # 不再用 input 单价统一高估。
+    ledger = UsageLedger(
+        input_cost_per_million=10.0,
+        output_cost_per_million=40.0,
+        cache_read_cost_per_million=1.0,
+        cache_write_cost_per_million=12.5,
+    )
+    ledger.record(
+        input_tokens=100,
+        output_tokens=20,
+        cache_read=1000,
+        cache_creation=200,
+    )
+    snapshot = ledger.snapshot()
+    # 100*10 + 1000*1 + 200*12.5 + 20*40 = 1000 + 1000 + 2500 + 800 = 5300 → 0.0053
+    assert snapshot.estimated_cost_usd == pytest.approx(0.0053)
+    # token 计数不受计价影响，仍然可加。
+    assert snapshot.total_tokens == 1320
+
+
 @pytest.mark.asyncio
 async def test_tui_memory_recall_reuses_main_usage_ledger(tmp_path: Path) -> None:
     from myclaude.app import MyClaudeApp
@@ -480,6 +519,7 @@ async def test_headless_runtime_connects_mcp_and_injects_instructions(
     )
     task_manager = SimpleNamespace(
         poll_completed=lambda: [],
+        drain=AsyncMock(),
         _async_tasks={},
         _tasks={},
     )

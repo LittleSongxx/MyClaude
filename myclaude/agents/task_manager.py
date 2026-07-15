@@ -205,3 +205,22 @@ class TaskManager:
             except asyncio.QueueEmpty:
                 break
         return completed
+
+    def pending_async_tasks(self) -> list[asyncio.Task[None]]:
+        return [t for t in self._async_tasks.values() if not t.done()]
+
+    async def drain(self, timeout: float | None = None) -> None:
+        """等待在途后台子 Agent 结束；超时后取消剩余任务并回收。
+
+        Headless 入口结束前调用，使后台子 Agent 要么跑完、要么被显式取消，
+        而不是随 ``asyncio.run()`` 关闭被静默取消——后者会让"后台完成后自动
+        通知"的工具契约落空。
+        """
+        pending = self.pending_async_tasks()
+        if not pending:
+            return
+        done, still = await asyncio.wait(pending, timeout=timeout)
+        for task in still:
+            task.cancel()
+        if still:
+            await asyncio.gather(*still, return_exceptions=True)

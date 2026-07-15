@@ -33,16 +33,35 @@ class UsageSnapshot:
 
 
 class UsageLedger:
-    """Thread-safe accounting shared by primary and secondary model calls."""
+    """Thread-safe accounting shared by primary and secondary model calls.
+
+    缓存读/写与普通输入的单价不同（Anthropic cache read ~0.1x、cache write
+    ~1.25x-2x input；OpenAI cache read ~0.25-0.5x）。用同一 input 单价计费会在
+    cache-heavy 场景高估成本。这里允许分别配置 cache_read / cache_write 单价，
+    未显式配置（None）时回退到 input 单价，保持与旧行为一致。
+    """
 
     def __init__(
         self,
         *,
         input_cost_per_million: float = 0.0,
         output_cost_per_million: float = 0.0,
+        cache_read_cost_per_million: float | None = None,
+        cache_write_cost_per_million: float | None = None,
     ) -> None:
         self.input_cost_per_million = input_cost_per_million
         self.output_cost_per_million = output_cost_per_million
+        # None 表示"未配置" —— 回退到 input 单价，避免在没有价目表时凭空造数。
+        self.cache_read_cost_per_million = (
+            cache_read_cost_per_million
+            if cache_read_cost_per_million is not None
+            else input_cost_per_million
+        )
+        self.cache_write_cost_per_million = (
+            cache_write_cost_per_million
+            if cache_write_cost_per_million is not None
+            else input_cost_per_million
+        )
         self._input_tokens = 0
         self._output_tokens = 0
         self._cache_read = 0
@@ -61,10 +80,14 @@ class UsageLedger:
         cache_creation: int = 0,
         purpose: str = "agent",
     ) -> None:
-        prompt_tokens = max(input_tokens, 0) + max(cache_read, 0) + max(cache_creation, 0)
+        uncached_input = max(input_tokens, 0)
+        cache_read_tokens = max(cache_read, 0)
+        cache_write_tokens = max(cache_creation, 0)
         completion_tokens = max(output_tokens, 0)
         cost = (
-            prompt_tokens * self.input_cost_per_million
+            uncached_input * self.input_cost_per_million
+            + cache_read_tokens * self.cache_read_cost_per_million
+            + cache_write_tokens * self.cache_write_cost_per_million
             + completion_tokens * self.output_cost_per_million
         ) / 1_000_000
         with self._lock:

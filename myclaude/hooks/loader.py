@@ -68,6 +68,13 @@ def load_hooks(raw_hooks: list[dict] | None) -> list[Hook]:
                     f"'{field_name}' field"
                 )
 
+        # agent 类型尚未实现；required fields 检查通过后再拒绝，让错误信息更精准（F-1）
+        if action_type == "agent":
+            raise HookConfigError(
+                f"{label}: action type 'agent' is not yet implemented. "
+                "Use 'command' or 'http' instead."
+            )
+
         reject = bool(entry.get("reject", False))
         if reject and event != "pre_tool_use":
             raise HookConfigError(

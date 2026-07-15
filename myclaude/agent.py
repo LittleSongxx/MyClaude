@@ -12,7 +12,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable
+from typing import Any, AsyncIterator, Awaitable, Callable
 
 from pydantic import ValidationError
 
@@ -48,6 +48,7 @@ from myclaude.permissions import (
 from myclaude.hooks import HookContext, HookEngine, ToolRejectedError
 from myclaude.hooks.engine import HookNotification
 from myclaude.prompts import build_environment_context, build_plan_mode_reminder, build_system_prompt
+from myclaude.run_context import RunContext
 from myclaude.tools import ToolRegistry
 from myclaude.tools.base import (
     MAX_OUTPUT_CHARS,
@@ -288,6 +289,7 @@ class Agent:
         memory_manager: MemoryManager | None = None,
         hook_engine: HookEngine | None = None,
         run_limits: RunLimits | None = None,
+        recall_fn: Callable[[str], Awaitable[str]] | None = None,
     ) -> None:
         self.client = client
         self.registry = registry
@@ -313,7 +315,9 @@ class Agent:
         self.memory_manager = memory_manager
         self.hook_engine = hook_engine
         self.run_limits = run_limits or RunLimits()
-        self._run_deadline: float | None = None
+        # RunContext 是本次 run 的 deadline / 取消 / 后台任务 / 背压的单一真相源。
+        # 在 run() 开始时构造；此前为 None（例如 fork 尚未进入循环）。
+        self._run_context: RunContext | None = None
         self._loop_count = 0
         # 记忆提取合并策略（对齐 Go 版 inProgress + pendingContext）：
         # _extracting: 标记是否有提取正在进行
@@ -337,7 +341,10 @@ class Agent:
         self.notification_fn: Callable[[], list[str]] | None = None
         self.file_history: Any = None
 
-        # 非阻塞 memory recall：prefetch task 与主 LLM 调用并行，工具执行后注入
+        # 非阻塞 memory recall：prefetch task 与主 LLM 调用并行，工具执行后注入。
+        # recall_fn 由共享 Runtime 注入，使 TUI / Headless / Remote 三入口获得一致的
+        # 召回语义；TUI 仍可自行预置 memory_recall_task（此时 Agent 不再重复启动）。
+        self.recall_fn: Callable[[str], Awaitable[str]] | None = recall_fn
         self.memory_recall_task: Any | None = None
         self._memory_recall_consumed: bool = False
         self._background_tasks: set[asyncio.Task[Any]] = set()
@@ -382,9 +389,9 @@ class Agent:
         )
 
     def _remaining_wall_time(self) -> float | None:
-        if self._run_deadline is None:
+        if self._run_context is None:
             return None
-        return max(self._run_deadline - time.monotonic(), 0.0)
+        return self._run_context.remaining()
 
     def _limit_reason(
         self,
@@ -481,6 +488,35 @@ class Agent:
             if task is self.memory_recall_task:
                 self._memory_recall_consumed = True
 
+    @staticmethod
+    def _latest_user_query(conversation: ConversationManager) -> str:
+        """取最近一条真实用户消息作为召回 query（跳过工具结果消息）。"""
+        for msg in reversed(conversation.history):
+            if msg.role == "user" and msg.content and not msg.tool_results:
+                return msg.content
+        return ""
+
+    def _maybe_start_recall(self, conversation: ConversationManager) -> None:
+        """由共享 Runtime 注入 recall_fn 时，Agent 自行启动动态召回。
+
+        这让 Headless / Remote 与 TUI 获得一致的召回语义，而不再是 TUI 专属。
+        若 memory_recall_task 已被外部设置（TUI 的 prefetch 路径），则不重复启动，
+        保持既有行为与相关测试不变。召回任务登记进 RunContext，随 run 生命周期
+        统一 drain / cancel，不会成为无人认领的后台任务。
+        """
+        if self.recall_fn is None:
+            return
+        if self.memory_recall_task is not None:
+            return
+        query = self._latest_user_query(conversation)
+        if not query:
+            return
+        task = asyncio.ensure_future(self.recall_fn(query))
+        self.memory_recall_task = task
+        self._memory_recall_consumed = False
+        if self._run_context is not None:
+            self._run_context.register(task)
+
     @property
     def plan_mode(self) -> bool:
         return self.permission_mode == PermissionMode.PLAN
@@ -512,6 +548,13 @@ class Agent:
 
     def activate_skill(self, name: str, prompt_body: str) -> None:
         self.active_skills[name] = prompt_body
+        # 统一在领域方法里记录 recovery，确保无论从哪个入口激活（模型工具
+        # LoadSkill、斜杠命令 inline），auto-compact 后的恢复附件都能带上该 skill
+        # 的 SOP，不会因入口不同而静默丢失。getattr 与 executor fork 路径保持一致，
+        # 也对未完整初始化的场景（如测试 mock）稳健。
+        recovery = getattr(self, "recovery_state", None)
+        if recovery is not None:
+            recovery.record_skill_invocation(name, prompt_body)
 
     def clear_active_skills(self) -> None:
         self.active_skills.clear()
@@ -587,12 +630,17 @@ class Agent:
         consecutive_unknown = 0
         max_tokens_escalated = False
         output_recoveries = 0
-        if self.run_limits.max_wall_time_seconds > 0:
-            self._run_deadline = (
-                time.monotonic() + self.run_limits.max_wall_time_seconds
-            )
-        else:
-            self._run_deadline = None
+        # RunContext 统一承载本次运行的 deadline / 取消 / 背压信号量，贯穿
+        # LLM stream、工具执行、retry sleep。子 Agent / fork 各自调用 run()，
+        # 因此天然拥有独立的 RunContext。
+        self._run_context = RunContext.from_wall_time(
+            self.run_limits.max_wall_time_seconds,
+        )
+
+        # 动态召回移入共享 Runtime：只要注入了 recall_fn 且本轮尚未有召回任务
+        # （TUI 会自行 prefetch 并预置 memory_recall_task），就在这里启动召回。
+        # 这样 Headless / Remote 也能获得与 TUI 一致的召回语义，而不再是 UI 专属。
+        self._maybe_start_recall(conversation)
 
         while True:
             iteration += 1
@@ -707,15 +755,7 @@ class Agent:
                     llm_stream = self.client.stream(
                         conversation, system=system, tools=tools
                     )
-                    remaining = self._remaining_wall_time()
-                    if remaining is not None:
-                        if remaining <= 0:
-                            raise TimeoutError
-                        async with asyncio.timeout(remaining):
-                            async for event in collector.consume(llm_stream):
-                                received_event = True
-                                yield event
-                    else:
+                    async with self._run_context.timeout_scope():
                         async for event in collector.consume(llm_stream):
                             received_event = True
                             yield event
@@ -771,7 +811,14 @@ class Agent:
                         else float(2 ** (request_attempt - 1))
                     )
                     yield RetryEvent(reason=str(exc), wait=wait)
-                    await asyncio.sleep(wait)
+                    # 退避睡眠必须受总 deadline 约束：不能睡过 deadline 再回来发现
+                    # 早已超时。若剩余预算不足以完成退避，直接判定超时退出。
+                    if not await self._run_context.sleep(wait):
+                        yield ErrorEvent(
+                            message="Agent run limit exceeded: maximum wall time reached"
+                        )
+                        fatal_request_error = True
+                        break
 
             if fatal_request_error:
                 break
@@ -1105,7 +1152,15 @@ class Agent:
     async def _execute_batch_parallel(
         self, calls: list[ToolCallComplete]
     ) -> list[_ToolExecResult]:
-        tasks = [self._execute_single_tool_direct(tc) for tc in calls]
+        # 并发只读工具经 RunContext 信号量限流，形成简单背压：并行读多个文件没问题，
+        # 但不至于让一次超大批次把文件句柄 / 连接打满。无 RunContext 时退化为原行为。
+        if self._run_context is not None:
+            tasks = [
+                self._run_context.run_bounded(self._execute_single_tool_direct(tc))
+                for tc in calls
+            ]
+        else:
+            tasks = [self._execute_single_tool_direct(tc) for tc in calls]
         return list(await asyncio.gather(*tasks))
 
     async def _execute_tool(
@@ -1204,7 +1259,9 @@ class Agent:
                 if response == PermissionResponse.ALLOW_ALWAYS:
                     from myclaude.permissions.rules import Rule
                     content = tool.permission_scope(tc.arguments).content
-                    pattern = f"{content[:60]}*" if len(content) > 60 else f"{content}*"
+                    # 存储完整命令作为精确匹配规则，避免截断+通配符导致意外匹配
+                    # 其他不相关的命令（S-5）
+                    pattern = content
                     # 持久化规则写入本地文件
                     rule = Rule(tool_name=tc.tool_name, pattern=pattern, effect="allow")
                     self.permission_checker.rule_engine.append_local_rule(rule)
@@ -1213,12 +1270,31 @@ class Agent:
 
         try:
             execution = asyncio.create_task(tool.execute(params))
+            # 工具执行也必须受总 deadline 约束——一个没有自身超时的 Bash 命令或
+            # MCP 调用（MCP 工具正是经由此路径执行）不能无限拖过运行时限。
+            remaining = (
+                self._run_context.remaining() if self._run_context else None
+            )
             if tool.interrupt_behavior == "cancel":
                 steering = asyncio.create_task(self._steering_event.wait())
                 done, _pending = await asyncio.wait(
-                    {execution, steering}, return_when=asyncio.FIRST_COMPLETED
+                    {execution, steering},
+                    return_when=asyncio.FIRST_COMPLETED,
+                    timeout=remaining,
                 )
-                if steering in done and execution not in done:
+                if not done:
+                    # 到达运行总时限：两个目标都未完成——取消工具执行，交由外层
+                    # 循环下一轮的 limit 检查统一收敛为「wall time reached」。
+                    execution.cancel()
+                    try:
+                        await execution
+                    except asyncio.CancelledError:
+                        pass
+                    result = ToolResult(
+                        output="Tool execution exceeded run deadline",
+                        is_error=True,
+                    )
+                elif steering in done and execution not in done:
                     execution.cancel()
                     try:
                         await execution
@@ -1231,8 +1307,22 @@ class Agent:
                 else:
                     result = await execution
                 steering.cancel()
-            else:
+            elif remaining is None:
                 result = await execution
+            else:
+                try:
+                    async with asyncio.timeout(remaining):
+                        result = await execution
+                except TimeoutError:
+                    execution.cancel()
+                    try:
+                        await execution
+                    except asyncio.CancelledError:
+                        pass
+                    result = ToolResult(
+                        output="Tool execution exceeded run deadline",
+                        is_error=True,
+                    )
         except Exception as e:
             result = ToolResult(
                 output=f"Tool execution error: {e}", is_error=True
