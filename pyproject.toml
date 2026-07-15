@@ -1,5 +1,5 @@
 [project]
-name = "mewcode"
+name = "myclaude"
 version = "0.3.0"
 description = "A focused terminal coding agent with durable context and safe tool execution"
 readme = "README.md"
@@ -16,13 +16,13 @@ dependencies = [
 ]
 
 [project.scripts]
-mewcode = "mewcode.__main__:main"
+myclaude = "myclaude.__main__:main"
 
 [project.urls]
 Repository = "https://github.com/LittleSongxx/MyClaude"
 
 [tool.hatch.build.targets.wheel]
-packages = ["mewcode"]
+packages = ["myclaude"]
 
 [build-system]
 requires = ["hatchling"]

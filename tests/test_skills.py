@@ -9,19 +9,20 @@ from __future__ import annotations
 import json
 import textwrap
 from pathlib import Path
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from mewcode.skills.parser import (
+from myclaude.skills.parser import (
     SkillDef,
     SkillParseError,
     parse_frontmatter,
     parse_skill_file,
     substitute_arguments,
 )
-from mewcode.skills.loader import SkillLoader
-from mewcode.tools import ToolRegistry
+from myclaude.skills.loader import SkillLoader
+from myclaude.tools import ToolRegistry
 
 # ---------------------------------------------------------------------------
 # 辅助工具
@@ -160,7 +161,7 @@ class TestSkillLoader:
         assert "backend-interview" not in skills
 
     def test_project_overrides_builtin(self, tmp_path: Path) -> None:
-        skills_dir = tmp_path / ".mewcode" / "skills"
+        skills_dir = tmp_path / ".myclaude" / "skills"
         skills_dir.mkdir(parents=True)
         custom = skills_dir / "commit.md"
         custom.write_text(textwrap.dedent("""\
@@ -175,6 +176,16 @@ class TestSkillLoader:
         skills = loader.load_all()
         assert skills["commit"].description == "Custom commit"
         assert "Custom prompt" in skills["commit"].prompt_body
+
+    def test_untrusted_loader_skips_project_skills(self, tmp_path: Path) -> None:
+        skills_dir = tmp_path / ".myclaude" / "skills"
+        skills_dir.mkdir(parents=True)
+        (skills_dir / "local.md").write_text(
+            "---\nname: local\ndescription: local\n---\nDo local work",
+            encoding="utf-8",
+        )
+        loader = SkillLoader(str(tmp_path), include_project=False)
+        assert "local" not in loader.load_all()
 
     def test_catalog_empty_without_project_skills(self) -> None:
         """无项目/用户 skill 且内置已移除时，catalog 为空。"""
@@ -197,7 +208,7 @@ class TestSkillLoader:
         assert loader.get("nonexistent") is None
 
     def test_hot_reload(self, tmp_path: Path) -> None:
-        skills_dir = tmp_path / ".mewcode" / "skills"
+        skills_dir = tmp_path / ".myclaude" / "skills"
         skills_dir.mkdir(parents=True)
         f = skills_dir / "custom.md"
         f.write_text(textwrap.dedent("""\
@@ -223,7 +234,7 @@ class TestSkillLoader:
         assert "v2" in skill.prompt_body
 
     def test_hot_reload_fallback_on_error(self, tmp_path: Path) -> None:
-        skills_dir = tmp_path / ".mewcode" / "skills"
+        skills_dir = tmp_path / ".myclaude" / "skills"
         skills_dir.mkdir(parents=True)
         f = skills_dir / "custom.md"
         f.write_text(textwrap.dedent("""\
@@ -242,7 +253,7 @@ class TestSkillLoader:
         assert skill.description == "good"
 
     def test_directory_skill_detected(self, tmp_path: Path) -> None:
-        skills_dir = tmp_path / ".mewcode" / "skills"
+        skills_dir = tmp_path / ".myclaude" / "skills"
         skill_dir = skills_dir / "my-skill"
         skill_dir.mkdir(parents=True)
         skill_md = skill_dir / "SKILL.md"
@@ -264,7 +275,7 @@ class TestSkillLoader:
         assert loader.get_source_label("nonexistent") == "unknown"
 
     def test_malformed_file_skipped(self, tmp_path: Path) -> None:
-        skills_dir = tmp_path / ".mewcode" / "skills"
+        skills_dir = tmp_path / ".myclaude" / "skills"
         skills_dir.mkdir(parents=True)
         bad = skills_dir / "broken.md"
         bad.write_text("not valid frontmatter")
@@ -296,7 +307,7 @@ class TestSkillLoader:
 class TestLoadSkillTool:
     @pytest.mark.asyncio
     async def test_load_existing_skill(self) -> None:
-        from mewcode.tools.load_skill import LoadSkill, LoadSkillParams
+        from myclaude.tools.load_skill import LoadSkill, LoadSkillParams
 
         tool = LoadSkill()
         loader = MagicMock()
@@ -321,7 +332,7 @@ class TestLoadSkillTool:
 
     @pytest.mark.asyncio
     async def test_load_unknown_skill(self) -> None:
-        from mewcode.tools.load_skill import LoadSkill, LoadSkillParams
+        from myclaude.tools.load_skill import LoadSkill, LoadSkillParams
 
         tool = LoadSkill()
         loader = MagicMock()
@@ -338,7 +349,7 @@ class TestLoadSkillTool:
 
     @pytest.mark.asyncio
     async def test_not_initialized(self) -> None:
-        from mewcode.tools.load_skill import LoadSkill, LoadSkillParams
+        from myclaude.tools.load_skill import LoadSkill, LoadSkillParams
 
         tool = LoadSkill()
         result = await tool.execute(LoadSkillParams(name="test"))
@@ -346,11 +357,67 @@ class TestLoadSkillTool:
         assert "not properly initialized" in result.output
 
     def test_is_system_tool(self) -> None:
-        from mewcode.tools.load_skill import LoadSkill
+        from myclaude.tools.load_skill import LoadSkill
 
         tool = LoadSkill()
         assert tool.is_system_tool is True
         assert tool.category == "read"
+
+
+class TestSkillFork:
+    def test_recent_context_uses_current_conversation(self) -> None:
+        from myclaude.conversation import ConversationManager
+        from myclaude.skills.executor import SkillExecutor
+
+        conversation = ConversationManager()
+        conversation.add_user_message("first")
+        conversation.add_assistant_message("second")
+        agent = SimpleNamespace(_current_conversation=conversation)
+        executor = SkillExecutor(agent=agent, client=MagicMock(), protocol="anthropic")
+
+        assert [m.content for m in executor._build_fork_context("recent")] == [
+            "first",
+            "second",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_fork_inherits_parent_permission_checker(self) -> None:
+        from myclaude.agent import LoopComplete
+        from myclaude.conversation import ConversationManager
+        from myclaude.skills.executor import SkillExecutor
+
+        checker = object()
+        conversation = ConversationManager()
+        conversation.add_user_message("context")
+        agent = SimpleNamespace(
+            recovery_state=None,
+            registry=ToolRegistry(),
+            work_dir=".",
+            max_iterations=2,
+            permission_checker=checker,
+            context_window=1000,
+            instructions_content="instructions",
+            memory_manager=None,
+            hook_engine=None,
+            _current_conversation=conversation,
+        )
+        executor = SkillExecutor(agent=agent, client=MagicMock(), protocol="anthropic")
+        skill = SkillDef(
+            name="review",
+            description="review",
+            prompt_body="Review $ARGUMENTS",
+            mode="fork",
+            context="recent",
+        )
+
+        async def run(_conversation):
+            yield LoopComplete(total_turns=1)
+
+        with patch("myclaude.agent.Agent") as agent_class:
+            agent_class.return_value.run = run
+            await executor.execute_fork(skill, "this")
+
+        assert agent_class.call_args.kwargs["permission_checker"] is checker
 
 # ---------------------------------------------------------------------------
 # Agent 集成
@@ -358,7 +425,7 @@ class TestLoadSkillTool:
 
 class TestAgentSkillIntegration:
     def test_env_context_does_not_include_active_skills(self) -> None:
-        from mewcode.prompts import build_environment_context
+        from myclaude.prompts import build_environment_context
 
         env = build_environment_context(
             "/test",
@@ -373,7 +440,7 @@ class TestAgentSkillIntegration:
         agent = MagicMock()
         agent.active_skills = {}
 
-        from mewcode.agent import Agent
+        from myclaude.agent import Agent
 
         real_agent = MagicMock(spec=Agent)
         real_agent.active_skills = {}

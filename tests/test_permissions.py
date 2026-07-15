@@ -14,7 +14,7 @@ from typing import Any, AsyncIterator
 import pytest
 import yaml
 
-from mewcode.agent import (
+from myclaude.agent import (
     Agent,
     ErrorEvent,
     LoopComplete,
@@ -26,9 +26,9 @@ from mewcode.agent import (
     TurnComplete,
     UsageEvent,
 )
-from mewcode.client import LLMClient
-from mewcode.conversation import ConversationManager
-from mewcode.permissions import (
+from myclaude.client import LLMClient
+from myclaude.conversation import ConversationManager
+from myclaude.permissions import (
     Decision,
     DangerousCommandDetector,
     PathSandbox,
@@ -40,9 +40,9 @@ from mewcode.permissions import (
     mode_decide,
     parse_rule,
 )
-from mewcode.permissions.dangerous import is_safe_command
-from mewcode.tools import create_default_registry
-from mewcode.tools.base import StreamEnd, StreamEvent, TextDelta, ToolCallComplete
+from myclaude.permissions.dangerous import is_safe_command
+from myclaude.tools import create_default_registry
+from myclaude.tools.base import StreamEnd, StreamEvent, TextDelta, ToolCallComplete
 
 # ===========================================================================
 # 第一层：DangerousCommandDetector（危险命令检测器）
@@ -61,12 +61,40 @@ class TestDangerousCommandDetector:
         hit, _ = self.detector.detect("rm -rf /")
         assert hit
 
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "rm -fr /",
+            "rm -r -f -- /",
+            "rm --recursive --force /",
+            "sudo /bin/rm -rf //",
+            "sudo -u root -- /bin/rm -rf /",
+            "env LANG=C rm -R /.",
+            "env -u LANG rm -rf /foo/..",
+            "nice -n 5 rm --recursive /",
+            "timeout -s KILL 10 /bin/rm -rf /",
+            "bash -lc 'rm -rf /'",
+            "bash --norc -c 'rm -rf /'",
+            "busybox rm -rf /",
+            "find / -delete",
+        ],
+    )
+    def test_structural_root_deletion_variants(self, command: str) -> None:
+        hit, _ = self.detector.detect(command)
+        assert hit
+
     def test_mkfs(self) -> None:
         hit, _ = self.detector.detect("mkfs.ext4 /dev/sda1")
         assert hit
 
     def test_dd_to_device(self) -> None:
         hit, _ = self.detector.detect("dd if=/dev/zero of=/dev/sda")
+        assert hit
+
+    def test_wrapped_dd_with_reordered_arguments(self) -> None:
+        hit, _ = self.detector.detect(
+            "sudo -n /bin/dd of=/dev/sda if=/dev/zero"
+        )
         assert hit
 
     def test_chmod_777_root(self) -> None:
@@ -176,7 +204,7 @@ class TestPathSandbox:
         assert ok
 
     def test_temp_dir_allowed(self) -> None:
-        tmp = Path(tempfile.gettempdir()) / "mewcode_test.txt"
+        tmp = Path(tempfile.gettempdir()) / "myclaude_test.txt"
         ok, _ = self.sandbox.check(str(tmp))
         assert ok
 
@@ -271,7 +299,7 @@ class TestRuleEngine:
 
     def test_append_local_rule(self) -> None:
         tmpdir = Path(tempfile.mkdtemp())
-        local_path = tmpdir / ".mewcode" / "permissions.local.yaml"
+        local_path = tmpdir / ".myclaude" / "permissions.local.yaml"
         engine = RuleEngine(local_rules_path=local_path)
         engine.append_local_rule(Rule(tool_name="Bash", pattern="git commit *", effect="allow"))
         assert local_path.exists()
@@ -319,28 +347,28 @@ class TestPermissionChecker:
         )
 
     def test_dangerous_command_denied(self) -> None:
-        from mewcode.tools.bash import Bash
+        from myclaude.tools.bash import Bash
         tool = Bash()
         d = self.checker.check(tool, {"command": "rm -rf /"})
         assert d.effect == "deny"
         assert "危险命令" in d.reason
 
     def test_write_path_outside_sandbox_asks(self) -> None:
-        from mewcode.tools.write_file import WriteFile
+        from myclaude.tools.write_file import WriteFile
         tool = WriteFile()
         d = self.checker.check(tool, {"file_path": "/etc/passwd", "content": "x"})
         assert d.effect == "ask"
         assert "沙箱" in d.reason
 
     def test_read_path_outside_sandbox_asks(self) -> None:
-        from mewcode.tools.read_file import ReadFile
+        from myclaude.tools.read_file import ReadFile
         tool = ReadFile()
         d = self.checker.check(tool, {"file_path": "/etc/passwd"})
         assert d.effect == "ask"
         assert "沙箱" in d.reason
 
     def test_read_tool_allowed_by_default_mode(self) -> None:
-        from mewcode.tools.read_file import ReadFile
+        from myclaude.tools.read_file import ReadFile
         tool = ReadFile()
         test_file = self.tmpdir / "hello.txt"
         test_file.write_text("hi")
@@ -348,29 +376,29 @@ class TestPermissionChecker:
         assert d.effect == "allow"
 
     def test_write_tool_asks_in_default_mode(self) -> None:
-        from mewcode.tools.write_file import WriteFile
+        from myclaude.tools.write_file import WriteFile
         tool = WriteFile()
         d = self.checker.check(tool, {"file_path": str(self.tmpdir / "new.txt"), "content": "hi"})
         assert d.effect == "ask"
 
     def test_bash_asks_in_default_mode(self) -> None:
-        from mewcode.tools.bash import Bash
+        from myclaude.tools.bash import Bash
         tool = Bash()
         d = self.checker.check(tool, {"command": "npm test"})
         assert d.effect == "ask"
 
     def test_plan_mode_denies_write(self) -> None:
-        from mewcode.tools.write_file import WriteFile
+        from myclaude.tools.write_file import WriteFile
         self.checker.mode = PermissionMode.PLAN
         tool = WriteFile()
         d = self.checker.check(tool, {"file_path": str(self.tmpdir / "x.txt"), "content": "hi"})
         assert d.effect == "deny"
 
     def test_plan_mode_allows_only_exact_plan_file(self) -> None:
-        from mewcode.tools.write_file import WriteFile
+        from myclaude.tools.write_file import WriteFile
 
         self.checker.mode = PermissionMode.PLAN
-        plan_path = self.tmpdir / ".mewcode" / "plans" / "safe.md"
+        plan_path = self.tmpdir / ".myclaude" / "plans" / "safe.md"
         self.checker.plan_file_path = str(plan_path)
         tool = WriteFile()
         allowed = self.checker.check(
@@ -384,33 +412,65 @@ class TestPermissionChecker:
         assert sibling.effect == "deny"
 
     def test_grep_sandbox_checks_search_path_not_pattern(self) -> None:
-        from mewcode.tools.grep import Grep
+        from myclaude.tools.grep import Grep
 
         decision = self.checker.check(
             Grep(),
             {
                 "pattern": "harmless",
-                "path": str(Path(self.tmpdir.anchor) / "outside-mewcode-test"),
+                "path": str(Path(self.tmpdir.anchor) / "outside-myclaude-test"),
             },
         )
         assert decision.effect == "ask"
 
     def test_bypass_mode_allows_all(self) -> None:
-        from mewcode.tools.bash import Bash
+        from myclaude.tools.bash import Bash
         self.checker.mode = PermissionMode.BYPASS
         tool = Bash()
         d = self.checker.check(tool, {"command": "npm test"})
         assert d.effect == "allow"
 
     def test_bypass_still_blocks_dangerous(self) -> None:
-        from mewcode.tools.bash import Bash
+        from myclaude.tools.bash import Bash
         self.checker.mode = PermissionMode.BYPASS
         tool = Bash()
         d = self.checker.check(tool, {"command": "rm -rf /"})
         assert d.effect == "deny"
 
+    def test_bypass_cannot_rewrite_security_configuration(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from myclaude.tools.write_file import WriteFile
+
+        home = self.tmpdir / "home"
+        monkeypatch.setenv("HOME", str(home))
+        checker = PermissionChecker(
+            detector=DangerousCommandDetector(),
+            sandbox=PathSandbox(str(self.tmpdir)),
+            rule_engine=RuleEngine(),
+            mode=PermissionMode.BYPASS,
+        )
+        protected = [
+            self.tmpdir / ".myclaude" / "config.yaml",
+            self.tmpdir / ".myclaude" / "config.local.yaml",
+            self.tmpdir / ".myclaude" / "permissions.yaml",
+            self.tmpdir / ".myclaude" / "permissions.local.yaml",
+            self.tmpdir / ".myclaude" / "skills" / "unsafe" / "SKILL.md",
+            home / ".myclaude" / "config.yaml",
+            home / ".myclaude" / "permissions.yaml",
+            home / ".myclaude" / "skills" / "unsafe" / "SKILL.md",
+            home / ".myclaude" / "trusted_workspaces.json",
+        ]
+
+        for path in protected:
+            decision = checker.check(
+                WriteFile(),
+                {"file_path": str(path), "content": "unsafe"},
+            )
+            assert decision.effect == "deny", path
+
     def test_rule_overrides_mode(self) -> None:
-        from mewcode.tools.bash import Bash
+        from myclaude.tools.bash import Bash
         tmpdir = Path(tempfile.mkdtemp())
         rules_file = tmpdir / "rules.yaml"
         rules_file.write_text(yaml.dump([
@@ -427,7 +487,7 @@ class TestPermissionChecker:
         assert d.effect == "allow"
 
     def test_explicit_deny_overrides_safe_command_allowlist(self) -> None:
-        from mewcode.tools.bash import Bash
+        from myclaude.tools.bash import Bash
 
         rules_file = self.tmpdir / "deny.yaml"
         rules_file.write_text(
@@ -568,7 +628,7 @@ async def test_e2e_sandbox_outside_path_asks():
 async def test_e2e_rule_allows_git():
     """放行 git 命令的规则可以让其无需人工介入（HITL）直接通过。"""
     tmpdir = Path(tempfile.mkdtemp())
-    rules_file = tmpdir / ".mewcode" / "permissions.yaml"
+    rules_file = tmpdir / ".myclaude" / "permissions.yaml"
     rules_file.parent.mkdir(parents=True)
     rules_file.write_text(yaml.dump([{"rule": "Bash(git *)", "effect": "allow"}]))
 
@@ -745,7 +805,7 @@ class TestSandboxAutoAllowRespectsDenyAsk:
             mode=PermissionMode.DEFAULT,
             sandbox_enabled=True,
         )
-        from mewcode.tools.bash import Bash
+        from myclaude.tools.bash import Bash
         tool = Bash()
         d = checker.check(tool, {"command": "echo ok && rm -rf /"})
         assert d.effect == "deny"
@@ -763,7 +823,7 @@ class TestSandboxAutoAllowRespectsDenyAsk:
             mode=PermissionMode.DEFAULT,
             sandbox_enabled=True,
         )
-        from mewcode.tools.bash import Bash
+        from myclaude.tools.bash import Bash
         tool = Bash()
         d = checker.check(tool, {"command": "go test ./..."})
         assert d.effect == "allow"
@@ -781,7 +841,7 @@ class TestSandboxAutoAllowRespectsDenyAsk:
             mode=PermissionMode.DEFAULT,
             sandbox_enabled=True,
         )
-        from mewcode.tools.bash import Bash
+        from myclaude.tools.bash import Bash
         tool = Bash()
         d = checker.check(tool, {"command": "git push origin main"})
         assert d.effect == "ask"

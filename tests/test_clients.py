@@ -5,10 +5,10 @@ from typing import Any
 
 import pytest
 
-from mewcode.client import OpenAIClient, OpenAICompatClient
-from mewcode.config import ProviderConfig
-from mewcode.conversation import ConversationManager
-from mewcode.tools.base import StreamEnd, ToolCallComplete, ToolCallStart
+from myclaude.client import AnthropicClient, OpenAIClient, OpenAICompatClient
+from myclaude.config import ProviderConfig
+from myclaude.conversation import ConversationManager
+from myclaude.tools.base import StreamEnd, ToolCallComplete, ToolCallStart
 
 
 class AsyncEvents:
@@ -32,6 +32,54 @@ def _config(protocol: str) -> ProviderConfig:
         api_key="test-key",
         max_output_tokens=321,
     )
+
+
+@pytest.mark.asyncio
+async def test_anthropic_46_uses_adaptive_thinking_payload() -> None:
+    class MessageStream:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        def __aiter__(self):
+            return AsyncEvents([]).__aiter__()
+
+        async def get_final_message(self):
+            return SimpleNamespace(
+                stop_reason="end_turn",
+                usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+            )
+
+    class Messages:
+        def __init__(self) -> None:
+            self.kwargs: dict[str, Any] = {}
+
+        def stream(self, **kwargs: Any) -> MessageStream:
+            self.kwargs = kwargs
+            return MessageStream()
+
+    config = _config("anthropic")
+    config.model = "claude-sonnet-4-6"
+    config.thinking = True
+    config.input_cost_per_million = 2.0
+    config.output_cost_per_million = 8.0
+    messages = Messages()
+    client = AnthropicClient(config)
+    client._client = SimpleNamespace(messages=messages)
+    conversation = ConversationManager()
+    conversation.add_user_message("think")
+
+    list_events = [event async for event in client.stream(conversation)]
+
+    assert list_events[-1].stop_reason == "end_turn"
+    assert messages.kwargs["thinking"] == {"type": "adaptive"}
+    usage = client.usage_ledger.snapshot()
+    assert usage.request_count == 1
+    assert (usage.input_tokens, usage.output_tokens) == (1, 1)
+    assert usage.by_purpose == {"agent": 1}
+    assert usage.estimated_cost_usd == pytest.approx(0.00001)
 
 
 @pytest.mark.asyncio

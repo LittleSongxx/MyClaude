@@ -12,8 +12,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from mewcode.commands.parser import complete, parse_command
-from mewcode.commands.registry import (
+from myclaude.commands.parser import complete, parse_command
+from myclaude.commands.registry import (
     Command,
     CommandContext,
     CommandRegistry,
@@ -250,8 +250,8 @@ class TestComplete:
 class TestHelpHandler:
     @pytest.mark.asyncio
     async def test_list_all(self) -> None:
-        from mewcode.commands.handlers import register_all_commands
-        from mewcode.commands.handlers.help import handle_help
+        from myclaude.commands.handlers import register_all_commands
+        from myclaude.commands.handlers.help import handle_help
 
         registry = CommandRegistry()
         register_all_commands(registry)
@@ -266,8 +266,8 @@ class TestHelpHandler:
 
     @pytest.mark.asyncio
     async def test_help_specific_command(self) -> None:
-        from mewcode.commands.handlers import register_all_commands
-        from mewcode.commands.handlers.help import handle_help
+        from myclaude.commands.handlers import register_all_commands
+        from myclaude.commands.handlers.help import handle_help
 
         registry = CommandRegistry()
         register_all_commands(registry)
@@ -280,8 +280,8 @@ class TestHelpHandler:
 
     @pytest.mark.asyncio
     async def test_help_unknown_command(self) -> None:
-        from mewcode.commands.handlers import register_all_commands
-        from mewcode.commands.handlers.help import handle_help
+        from myclaude.commands.handlers import register_all_commands
+        from myclaude.commands.handlers.help import handle_help
 
         registry = CommandRegistry()
         register_all_commands(registry)
@@ -295,7 +295,7 @@ class TestPlanDoHandlers:
 
     @pytest.mark.asyncio
     async def test_plan_switches_mode(self) -> None:
-        from mewcode.commands.handlers.plan import handle_plan
+        from myclaude.commands.handlers.plan import handle_plan
 
         ui = MockUI()
         ctx = _make_context(args="", ui=ui)
@@ -305,7 +305,7 @@ class TestPlanDoHandlers:
 
     @pytest.mark.asyncio
     async def test_plan_with_args_sends_message(self) -> None:
-        from mewcode.commands.handlers.plan import handle_plan
+        from myclaude.commands.handlers.plan import handle_plan
 
         ui = MockUI()
         ctx = _make_context(args="设计登录模块", ui=ui)
@@ -316,7 +316,7 @@ class TestPlanDoHandlers:
 class TestSkillHandler:
     @pytest.mark.asyncio
     async def test_skill_list_no_loader(self) -> None:
-        from mewcode.commands.handlers.skill import handle_skill
+        from myclaude.commands.handlers.skill import handle_skill
 
         ui = MockUI()
         ctx = _make_context(args="list", ui=ui)
@@ -325,7 +325,7 @@ class TestSkillHandler:
 
     @pytest.mark.asyncio
     async def test_skill_list_with_loader(self) -> None:
-        from mewcode.commands.handlers.skill import handle_skill
+        from myclaude.commands.handlers.skill import handle_skill
 
         ui = MockUI()
         ctx = _make_context(args="list", ui=ui)
@@ -339,7 +339,7 @@ class TestSkillHandler:
 
     @pytest.mark.asyncio
     async def test_skill_unknown_subcmd(self) -> None:
-        from mewcode.commands.handlers.skill import handle_skill
+        from myclaude.commands.handlers.skill import handle_skill
 
         ui = MockUI()
         ctx = _make_context(args="foobar", ui=ui)
@@ -352,7 +352,7 @@ class TestStatusHandler:
 
     @pytest.mark.asyncio
     async def test_status_output(self) -> None:
-        from mewcode.commands.handlers.status import handle_status
+        from myclaude.commands.handlers.status import handle_status
 
         ui = MockUI()
         agent = MagicMock()
@@ -370,13 +370,13 @@ class TestStatusHandler:
         ctx.memory_manager.load.return_value = ""
 
         await handle_status(ctx)
-        assert "MewCode 状态" in ui.messages[0]
+        assert "MyClaude 状态" in ui.messages[0]
         assert "default" in ui.messages[0]
 
 class TestSessionHandler:
     @pytest.mark.asyncio
     async def test_session_no_manager(self) -> None:
-        from mewcode.commands.handlers.session import handle_session
+        from myclaude.commands.handlers.session import handle_session
 
         ui = MockUI()
         ctx = _make_context(args="", ui=ui)
@@ -386,7 +386,7 @@ class TestSessionHandler:
 
     @pytest.mark.asyncio
     async def test_session_list_empty(self) -> None:
-        from mewcode.commands.handlers.session import handle_session
+        from myclaude.commands.handlers.session import handle_session
 
         ui = MockUI()
         sm = MagicMock()
@@ -398,7 +398,7 @@ class TestSessionHandler:
 
     @pytest.mark.asyncio
     async def test_session_unknown_sub(self) -> None:
-        from mewcode.commands.handlers.session import handle_session
+        from myclaude.commands.handlers.session import handle_session
 
         ui = MockUI()
         ctx = _make_context(args="foobar", ui=ui)
@@ -409,7 +409,7 @@ class TestSessionHandler:
 class TestMemoryHandler:
     @pytest.mark.asyncio
     async def test_memory_display(self) -> None:
-        from mewcode.commands.handlers.memory import handle_memory
+        from myclaude.commands.handlers.memory import handle_memory
 
         ui = MockUI()
         mm = MagicMock()
@@ -421,7 +421,7 @@ class TestMemoryHandler:
 
     @pytest.mark.asyncio
     async def test_memory_clear(self) -> None:
-        from mewcode.commands.handlers.memory import handle_memory
+        from myclaude.commands.handlers.memory import handle_memory
 
         ui = MockUI()
         mm = MagicMock()
@@ -433,7 +433,7 @@ class TestMemoryHandler:
 
     @pytest.mark.asyncio
     async def test_memory_no_manager(self) -> None:
-        from mewcode.commands.handlers.memory import handle_memory
+        from myclaude.commands.handlers.memory import handle_memory
 
         ui = MockUI()
         ctx = _make_context(args="", ui=ui)
@@ -447,7 +447,7 @@ class TestMemoryHandler:
 
 class TestRegisterAllCommands:
     def test_all_commands_registered(self) -> None:
-        from mewcode.commands.handlers import register_all_commands
+        from myclaude.commands.handlers import register_all_commands
 
         registry = CommandRegistry()
         register_all_commands(registry)
@@ -455,19 +455,19 @@ class TestRegisterAllCommands:
         names = {c.name for c in cmds}
         expected = {
             "help", "compact", "clear", "plan",
-            "session", "mcp", "memory", "permission",
+            "session", "mcp", "memory", "permission", "review",
             "sandbox", "rewind", "status", "skill",
         }
         assert names == expected
 
     def test_no_alias_conflicts(self) -> None:
-        from mewcode.commands.handlers import register_all_commands
+        from myclaude.commands.handlers import register_all_commands
 
         registry = CommandRegistry()
         register_all_commands(registry)
 
     def test_aliases_work(self) -> None:
-        from mewcode.commands.handlers import register_all_commands
+        from myclaude.commands.handlers import register_all_commands
 
         registry = CommandRegistry()
         register_all_commands(registry)
@@ -477,3 +477,55 @@ class TestRegisterAllCommands:
         assert registry.find("p").name == "plan"
         assert registry.find("s").name == "status"
         assert registry.find("?").name == "help"
+
+    @pytest.mark.asyncio
+    async def test_custom_commands_are_registered_only_from_trusted_layers(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        from myclaude.commands import register_user_commands
+        from myclaude.commands.handlers import register_all_commands
+
+        home_commands = tmp_path / "home" / ".myclaude" / "commands"
+        project_commands = tmp_path / "project" / ".myclaude" / "commands"
+        home_commands.mkdir(parents=True)
+        project_commands.mkdir(parents=True)
+        (home_commands / "user-check.md").write_text(
+            "Check user settings for $ARGUMENTS",
+            encoding="utf-8",
+        )
+        (project_commands / "project-check.md").write_text(
+            "Check project settings for $ARGUMENTS",
+            encoding="utf-8",
+        )
+        (project_commands / "help.md").write_text(
+            "Must not replace the built-in help command.",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+        untrusted = CommandRegistry()
+        register_all_commands(untrusted)
+        assert register_user_commands(
+            untrusted,
+            str(tmp_path / "project"),
+            include_project=False,
+        ) == []
+        assert untrusted.find("user-check") is not None
+        assert untrusted.find("project-check") is None
+
+        trusted = CommandRegistry()
+        register_all_commands(trusted)
+        errors = register_user_commands(
+            trusted,
+            str(tmp_path / "project"),
+            include_project=True,
+        )
+        assert trusted.find("user-check") is not None
+        project_command = trusted.find("project-check")
+        assert project_command is not None
+        assert trusted.find("help").description != "Must not replace the built-in help command."
+        assert len(errors) == 1
+
+        ui = MockUI()
+        await project_command.handler(_make_context(args="database", ui=ui))
+        assert ui.sent_messages == ["Check project settings for database"]

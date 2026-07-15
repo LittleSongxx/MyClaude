@@ -15,24 +15,24 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from mewcode.agents.parser import AgentDef, AgentParseError, parse_agent_file, parse_frontmatter
-from mewcode.agents.loader import AgentLoader
-from mewcode.agents.tool_filter import (
+from myclaude.agents.parser import AgentDef, AgentParseError, parse_agent_file, parse_frontmatter
+from myclaude.agents.loader import AgentLoader
+from myclaude.agents.tool_filter import (
     ALL_AGENT_DISALLOWED_TOOLS,
     ASYNC_AGENT_ALLOWED_TOOLS,
     resolve_agent_tools,
 )
-from mewcode.agents.fork import (
+from myclaude.agents.fork import (
     FORK_BOILERPLATE_TAG,
     ForkError,
     build_forked_messages,
 )
-from mewcode.agents.trace import TraceManager, TraceNode
-from mewcode.agents.task_manager import BackgroundTask, TaskManager
-from mewcode.agents.notification import format_task_notification, inject_task_notifications
-from mewcode.conversation import ConversationManager, Message, ToolResultBlock, ToolUseBlock
-from mewcode.tools import ToolRegistry
-from mewcode.tools.base import Tool, ToolResult
+from myclaude.agents.trace import TraceManager, TraceNode
+from myclaude.agents.task_manager import BackgroundTask, TaskManager
+from myclaude.agents.notification import format_task_notification, inject_task_notifications
+from myclaude.conversation import ConversationManager, Message, ToolResultBlock, ToolUseBlock
+from myclaude.tools import ToolRegistry
+from myclaude.tools.base import Tool, ToolResult
 
 # =====================================================================
 # 辅助函数
@@ -210,7 +210,7 @@ class TestAgentLoader:
         assert "Verification" in agents
 
     def test_project_overrides_builtin(self, tmp_path: Path):
-        agents_dir = tmp_path / ".mewcode" / "agents"
+        agents_dir = tmp_path / ".myclaude" / "agents"
         agents_dir.mkdir(parents=True)
         custom_md = make_agent_md(
             name="Explore",
@@ -246,7 +246,7 @@ class TestAgentLoader:
         assert "general-purpose" in names
 
     def test_hot_reload(self, tmp_path: Path):
-        agents_dir = tmp_path / ".mewcode" / "agents"
+        agents_dir = tmp_path / ".myclaude" / "agents"
         agents_dir.mkdir(parents=True)
         f = agents_dir / "custom.md"
         f.write_text(make_agent_md(name="custom", description="v1"))
@@ -259,7 +259,7 @@ class TestAgentLoader:
         assert loader.get("custom").when_to_use == "v2"
 
     def test_bad_file_skipped(self, tmp_path: Path):
-        agents_dir = tmp_path / ".mewcode" / "agents"
+        agents_dir = tmp_path / ".myclaude" / "agents"
         agents_dir.mkdir(parents=True)
         (agents_dir / "bad.md").write_text("no frontmatter")
         (agents_dir / "good.md").write_text(
@@ -653,7 +653,7 @@ class TestNotification:
 
 class TestConfig:
     def test_enable_fork_default(self, tmp_path: Path):
-        from mewcode.config import load_config
+        from myclaude.config import load_config
         cfg = tmp_path / "config.yaml"
         cfg.write_text(textwrap.dedent("""\
         providers:
@@ -667,7 +667,7 @@ class TestConfig:
         assert config.enable_verification_agent is False
 
     def test_enable_fork_true(self, tmp_path: Path):
-        from mewcode.config import load_config
+        from myclaude.config import load_config
         cfg = tmp_path / "config.yaml"
         cfg.write_text(textwrap.dedent("""\
         providers:
@@ -688,11 +688,75 @@ class TestConfig:
 
 class TestPermissionMode:
     def test_bypass_mode(self):
-        from mewcode.permissions.modes import PermissionMode, mode_decide
+        from myclaude.permissions.modes import PermissionMode, mode_decide
         assert PermissionMode.BYPASS.value == "bypassPermissions"
         assert mode_decide(PermissionMode.BYPASS, "read") == "allow"
         assert mode_decide(PermissionMode.BYPASS, "write") == "allow"
         assert mode_decide(PermissionMode.BYPASS, "command") == "allow"
+
+    @pytest.mark.asyncio
+    async def test_project_agent_cannot_escalate_parent_permissions(
+        self, tmp_path: Path
+    ):
+        from myclaude.agent import Agent
+        from myclaude.permissions import (
+            DangerousCommandDetector,
+            PathSandbox,
+            PermissionChecker,
+            PermissionMode,
+            RuleEngine,
+        )
+        from myclaude.tools.agent_tool import AgentTool, AgentToolParams
+        from myclaude.usage import RunLimits
+
+        detector = DangerousCommandDetector()
+        rules = RuleEngine()
+        parent_checker = PermissionChecker(
+            detector=detector,
+            sandbox=PathSandbox(str(tmp_path)),
+            rule_engine=rules,
+            mode=PermissionMode.DEFAULT,
+        )
+        limits = RunLimits(max_total_tokens=10_000)
+        parent = Agent(
+            client=MagicMock(),
+            registry=make_registry("ReadFile"),
+            protocol="anthropic",
+            work_dir=str(tmp_path),
+            permission_checker=parent_checker,
+            run_limits=limits,
+        )
+        definition = AgentDef(
+            agent_type="escalating-agent",
+            when_to_use="test",
+            permission_mode="bypassPermissions",
+        )
+        loader = MagicMock()
+        loader.get.return_value = definition
+        task_manager = MagicMock()
+        task_manager.launch.return_value = "task-1"
+        tool = AgentTool(
+            agent_loader=loader,
+            task_manager=task_manager,
+            trace_manager=TraceManager(),
+            parent_agent=parent,
+        )
+
+        result = await tool.execute(
+            AgentToolParams(
+                prompt="inspect",
+                description="test",
+                subagent_type="escalating-agent",
+                run_in_background=True,
+            )
+        )
+
+        assert result.is_error is False
+        child = task_manager.launch.call_args.kwargs["agent"]
+        assert child.permission_mode is PermissionMode.DEFAULT
+        assert child.permission_checker.detector is detector
+        assert child.permission_checker.rule_engine is rules
+        assert child.run_limits is limits
 
 # =====================================================================
 # 10. AgentTool 参数
@@ -700,14 +764,14 @@ class TestPermissionMode:
 
 class TestAgentToolParams:
     def test_required_fields(self):
-        from mewcode.tools.agent_tool import AgentToolParams
+        from myclaude.tools.agent_tool import AgentToolParams
         params = AgentToolParams(prompt="do this", description="test")
         assert params.prompt == "do this"
         assert params.subagent_type is None
         assert params.run_in_background is False
 
     def test_optional_fields(self):
-        from mewcode.tools.agent_tool import AgentToolParams
+        from myclaude.tools.agent_tool import AgentToolParams
         params = AgentToolParams(
             prompt="do",
             description="test",
@@ -729,7 +793,7 @@ class TestAgentToolParams:
 
 class TestAgentExtensions:
     def test_agent_has_id(self):
-        from mewcode.agent import Agent
+        from myclaude.agent import Agent
         client = MagicMock()
         registry = ToolRegistry()
         agent = Agent(client=client, registry=registry, protocol="anthropic")
@@ -739,7 +803,7 @@ class TestAgentExtensions:
         assert agent.trace_id is None
 
     def test_agent_catalog(self):
-        from mewcode.agent import Agent
+        from myclaude.agent import Agent
         client = MagicMock()
         registry = ToolRegistry()
         agent = Agent(client=client, registry=registry, protocol="anthropic")

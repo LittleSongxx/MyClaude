@@ -7,15 +7,15 @@ from typing import Any
 
 import pytest
 
-from mewcode.client import LLMClient
-from mewcode.config import ProviderConfig, _load_single_file, _merge_config
-from mewcode.conversation import ConversationManager
-from mewcode.memory.auto_memory import MemoryManager
-from mewcode.memory.session import SessionMeta
-from mewcode.permissions import PermissionMode
-from mewcode.runtime import build_core_runtime
-from mewcode.tools import create_default_registry
-from mewcode.tools.base import StreamEnd, StreamEvent, TextDelta
+from myclaude.client import LLMClient
+from myclaude.config import ConfigError, ProviderConfig, _load_single_file, _merge_config
+from myclaude.conversation import ConversationManager
+from myclaude.memory.auto_memory import MemoryManager
+from myclaude.memory.session import SessionMeta
+from myclaude.permissions import PermissionMode
+from myclaude.runtime import build_core_runtime
+from myclaude.tools import create_default_registry
+from myclaude.tools.base import StreamEnd, StreamEvent, TextDelta
 
 
 class DummyClient(LLMClient):
@@ -95,6 +95,113 @@ worktree:
     assert merged.worktree.stale_cutoff_hours == 48
 
 
+def test_config_loads_provider_pricing_and_run_limits(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+providers:
+  - name: priced
+    protocol: anthropic
+    base_url: https://example.invalid
+    model: claude-test
+    input_cost_per_million: 3.5
+    output_cost_per_million: 15
+run_limits:
+  max_turns: 25
+  max_wall_time_seconds: 90.5
+  max_total_tokens: 500000
+  max_cost_usd: 2.75
+""",
+        encoding="utf-8",
+    )
+
+    config = _load_single_file(config_path)
+
+    assert config.providers[0].input_cost_per_million == 3.5
+    assert config.providers[0].output_cost_per_million == 15.0
+    assert config.run_limits.max_turns == 25
+    assert config.run_limits.max_wall_time_seconds == 90.5
+    assert config.run_limits.max_total_tokens == 500_000
+    assert config.run_limits.max_cost_usd == 2.75
+
+
+def test_config_layer_partially_merges_run_limits(tmp_path: Path) -> None:
+    base_path = tmp_path / "base.yaml"
+    base_path.write_text(
+        """
+providers:
+  - name: test
+    protocol: anthropic
+    base_url: https://example.invalid
+    model: claude-test
+run_limits:
+  max_turns: 12
+  max_wall_time_seconds: 60
+  max_cost_usd: 4
+""",
+        encoding="utf-8",
+    )
+    override_path = tmp_path / "override.yaml"
+    override_path.write_text(
+        """
+run_limits:
+  max_total_tokens: 123456
+""",
+        encoding="utf-8",
+    )
+
+    merged = _merge_config(
+        _load_single_file(base_path),
+        _load_single_file(override_path, require_providers=False),
+    )
+
+    assert merged.run_limits.max_turns == 12
+    assert merged.run_limits.max_wall_time_seconds == 60.0
+    assert merged.run_limits.max_total_tokens == 123_456
+    assert merged.run_limits.max_cost_usd == 4.0
+
+
+@pytest.mark.parametrize(
+    ("section"),
+    [
+        "run_limits:\n  max_turns: -1",
+        "run_limits:\n  max_total_tokens: 1.5",
+        "run_limits:\n  max_wall_time_seconds: never",
+        "run_limits:\n  max_cost_usd: true",
+        "run_limits:\n  max_cost_usd: .inf",
+        "run_limits:\n  max_tokens: 1000",
+        "providers:\n  - name: test\n    protocol: anthropic\n"
+        "    base_url: https://example.invalid\n    model: claude-test\n"
+        "    input_cost_per_million: -0.1",
+        "providers:\n  - name: test\n    protocol: anthropic\n"
+        "    base_url: https://example.invalid\n    model: claude-test\n"
+        "    output_cost_per_million: unknown",
+        "providers:\n  - name: test\n    protocol: anthropic\n"
+        "    base_url: https://example.invalid\n    model: claude-test\n"
+        "    input_cost_per_million: .nan",
+    ],
+)
+def test_config_rejects_invalid_limits_and_pricing(
+    tmp_path: Path, section: str
+) -> None:
+    config_path = tmp_path / "invalid.yaml"
+    if section.startswith("providers:"):
+        contents = section
+    else:
+        contents = (
+            "providers:\n"
+            "  - name: test\n"
+            "    protocol: anthropic\n"
+            "    base_url: https://example.invalid\n"
+            "    model: claude-test\n"
+            f"{section}\n"
+        )
+    config_path.write_text(contents, encoding="utf-8")
+
+    with pytest.raises(ConfigError):
+        _load_single_file(config_path)
+
+
 @pytest.mark.asyncio
 async def test_delete_requires_fresh_read_and_refuses_directories(
     tmp_path: Path,
@@ -172,13 +279,13 @@ def test_version_does_not_create_project_state(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from mewcode.__main__ import main
+    from myclaude.__main__ import main
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(sys, "argv", ["mewcode", "--version"])
+    monkeypatch.setattr(sys, "argv", ["myclaude", "--version"])
     with pytest.raises(SystemExit) as exc:
         main()
 
     assert exc.value.code == 0
-    assert "mewcode 0.3.0" in capsys.readouterr().out
-    assert not (tmp_path / ".mewcode").exists()
+    assert "myclaude 0.3.0" in capsys.readouterr().out
+    assert not (tmp_path / ".myclaude").exists()

@@ -1,15 +1,33 @@
-# Copy this file to .mewcode/config.yaml.
+# Copy this file to .myclaude/config.yaml.
 providers:
   - name: anthropic
     protocol: anthropic
     base_url: https://api.anthropic.com
-    model: claude-sonnet-4-5
+    model: claude-sonnet-4-6
     # Prefer ANTHROPIC_API_KEY in the environment. You may also set api_key here.
     thinking: false
     context_window: 200000
     max_output_tokens: 8192
+    # Optional prices power the shared estimated-cost ledger and max_cost_usd.
+    # Set these to the prices that apply to your account/model.
+    input_cost_per_million: 0
+    output_cost_per_million: 0
 
 permission_mode: default
+
+# Zero disables a limit. Token/cost accounting is shared by the main Agent,
+# sub-agents, compaction, memory recall/extraction/consolidation, and
+# session-summary calls.
+run_limits:
+  max_turns: 0
+  max_wall_time_seconds: 0
+  max_total_tokens: 0
+  max_cost_usd: 0
+
+enable_fork: false
+enable_verification_agent: false
+teammate_mode: in-process
+enable_coordinator_mode: false
 
 # Worktree support and automatic memory are enabled by default. These settings
 # tune worktree lifecycle behavior; they do not create a worktree at startup.
@@ -21,7 +39,7 @@ worktree:
   stale_cleanup_interval: 3600
   stale_cutoff_hours: 24
 
-# Optional OS-level command isolation. MewCode enables auto_allow only when a
+# Optional OS-level command isolation. MyClaude enables auto_allow only when a
 # supported sandbox is actually available (bubblewrap on Linux, Seatbelt on macOS).
 sandbox:
   enabled: false
@@ -29,4 +47,8 @@ sandbox:
   network_enabled: false
 
 mcp_servers: []
+
+# Command hooks receive HookContext JSON on stdin and in
+# MYCLAUDE_HOOK_CONTEXT. A pre_tool_use hook may print
+# {"decision":"deny","reason":"..."} to block the tool call.
 hooks: []

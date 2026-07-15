@@ -8,14 +8,12 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from typing import Any, AsyncIterator
 from unittest.mock import patch
 
 import pytest
 
-from mewcode.hooks import (
+from myclaude.hooks import (
     Action,
-    ActionResult,
     Condition,
     ConditionGroup,
     ConditionParseError,
@@ -233,7 +231,7 @@ class TestConditionGroupEvaluate:
 class TestCommandExecutor:
     @pytest.mark.asyncio
     async def test_normal_execution(self):
-        from mewcode.hooks.executors import execute_command
+        from myclaude.hooks.executors import execute_command
 
         action = Action(type="command", command="echo hello")
         ctx = HookContext()
@@ -243,7 +241,7 @@ class TestCommandExecutor:
 
     @pytest.mark.asyncio
     async def test_variable_substitution(self):
-        from mewcode.hooks.executors import execute_command
+        from myclaude.hooks.executors import execute_command
 
         action = Action(type="command", command="echo $FILE_PATH")
         ctx = HookContext(file_path="src/main.py")
@@ -252,7 +250,7 @@ class TestCommandExecutor:
 
     @pytest.mark.asyncio
     async def test_timeout(self):
-        from mewcode.hooks.executors import execute_command
+        from myclaude.hooks.executors import execute_command
 
         command = f'"{sys.executable}" -c "import time; time.sleep(10)"'
         action = Action(type="command", command=command, timeout=1)
@@ -261,10 +259,50 @@ class TestCommandExecutor:
         assert result.success is False
         assert "timed out" in result.output
 
+    @pytest.mark.asyncio
+    async def test_structured_context_is_sent_on_stdin_and_in_environment(
+        self, tmp_path
+    ):
+        from myclaude.hooks.executors import execute_command
+
+        script = tmp_path / "inspect_hook_context.py"
+        script.write_text(
+            """\
+import json
+import os
+import sys
+
+stdin_context = json.load(sys.stdin)
+env_context = json.loads(os.environ["MYCLAUDE_HOOK_CONTEXT"])
+assert stdin_context == env_context
+assert stdin_context["event"] == "pre_tool_use"
+assert stdin_context["tool_name"] == "WriteFile"
+assert stdin_context["tool_args"] == {"file_path": "src/main.py"}
+print(json.dumps({"decision": "allow", "reason": "context-ok"}))
+""",
+            encoding="utf-8",
+        )
+        action = Action(
+            type="command",
+            command=f'"{sys.executable}" "{script}"',
+        )
+        ctx = HookContext(
+            event_name="pre_tool_use",
+            tool_name="WriteFile",
+            tool_args={"file_path": "src/main.py"},
+            file_path="src/main.py",
+        )
+
+        result = await execute_command(action, ctx)
+
+        assert result.success is True
+        assert result.decision == "allow"
+        assert result.output == "context-ok"
+
 class TestPromptExecutor:
     @pytest.mark.asyncio
     async def test_returns_message(self):
-        from mewcode.hooks.executors import execute_prompt
+        from myclaude.hooks.executors import execute_prompt
 
         action = Action(type="prompt", message="Hello $TOOL_NAME")
         ctx = HookContext(tool_name="WriteFile")
@@ -275,12 +313,12 @@ class TestPromptExecutor:
 class TestHttpExecutor:
     @pytest.mark.asyncio
     async def test_mock_request(self):
-        from mewcode.hooks.executors import execute_http
+        from myclaude.hooks.executors import execute_http
 
         action = Action(type="http", url="https://httpbin.org/post", body='{"test": true}')
         ctx = HookContext()
         # 用 mock 避免发起真实的网络请求
-        with patch("mewcode.hooks.executors.urlopen") as mock_urlopen:
+        with patch("myclaude.hooks.executors.urlopen") as mock_urlopen:
             mock_resp = mock_urlopen.return_value.__enter__.return_value
             mock_resp.status = 200
             mock_resp.read.return_value = b'{"ok": true}'
@@ -291,18 +329,18 @@ class TestHttpExecutor:
 class TestAgentExecutor:
     @pytest.mark.asyncio
     async def test_stub(self):
-        from mewcode.hooks.executors import execute_agent
+        from myclaude.hooks.executors import execute_agent
 
         action = Action(type="agent", prompt="Check $FILE_PATH")
         ctx = HookContext(file_path="test.py")
         result = await execute_agent(action, ctx)
-        assert result.success is True
+        assert result.success is False
         assert "not yet implemented" in result.output
 
 class TestExecuteAction:
     @pytest.mark.asyncio
     async def test_dispatch(self):
-        from mewcode.hooks.executors import execute_action
+        from myclaude.hooks.executors import execute_action
 
         action = Action(type="command", command="echo dispatch_test")
         ctx = HookContext()
@@ -311,7 +349,7 @@ class TestExecuteAction:
 
     @pytest.mark.asyncio
     async def test_unknown_type(self):
-        from mewcode.hooks.executors import execute_action
+        from myclaude.hooks.executors import execute_action
 
         action = Action(type="unknown")
         ctx = HookContext()
@@ -465,6 +503,32 @@ class TestHookEngine:
         assert result is None
 
     @pytest.mark.asyncio
+    async def test_command_hook_can_explicitly_deny_tool_use(self, tmp_path):
+        script = tmp_path / "deny_hook.py"
+        script.write_text(
+            "import json\n"
+            "print(json.dumps({'decision': 'deny', 'reason': 'blocked by policy'}))\n",
+            encoding="utf-8",
+        )
+        h = self._make_hook(
+            id="policy-check",
+            event="pre_tool_use",
+            action=Action(
+                type="command",
+                command=f'"{sys.executable}" "{script}"',
+            ),
+            reject=False,
+        )
+        engine = HookEngine([h])
+        ctx = HookContext(event_name="pre_tool_use", tool_name="WriteFile")
+
+        result = await engine.run_pre_tool_hooks(ctx)
+
+        assert isinstance(result, ToolRejectedError)
+        assert result.hook_id == "policy-check"
+        assert result.reason == "blocked by policy"
+
+    @pytest.mark.asyncio
     async def test_prompt_message_collection(self):
         h = self._make_hook(
             id="inject",
@@ -514,11 +578,11 @@ class TestAgentHookIntegration:
 
     @pytest.mark.asyncio
     async def test_pre_tool_use_reject_skips_tool(self):
-        from mewcode.agent import Agent, ToolResultEvent
-        from mewcode.client import LLMClient
-        from mewcode.conversation import ConversationManager
-        from mewcode.tools import create_default_registry
-        from mewcode.tools.base import StreamEnd, StreamEvent, TextDelta, ToolCallComplete
+        from myclaude.agent import Agent, ToolResultEvent
+        from myclaude.client import LLMClient
+        from myclaude.conversation import ConversationManager
+        from myclaude.tools import create_default_registry
+        from myclaude.tools.base import StreamEnd, TextDelta, ToolCallComplete
 
         class MockClient(LLMClient):
             def __init__(self):

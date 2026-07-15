@@ -13,6 +13,6 @@ build/
 Thumbs.db
 .idea/
 .vscode/
-.mewcode/
+.myclaude/
 .claude/
 CLAUDE.md
