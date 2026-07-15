@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import yaml
+from pydantic import ValidationError
 
 from myclaude.config import (
     AppConfig,
@@ -220,6 +221,52 @@ class TestMCPToolWrapper:
         schema = wrapper.get_schema()
         assert schema["name"] == "mcp__srv__search"
         assert schema["input_schema"] == input_schema
+
+    def test_free_form_schema_preserves_all_arguments(self) -> None:
+        from myclaude.mcp.tool_wrapper import _build_params_model
+
+        model = _build_params_model(
+            "FreeForm",
+            {"type": "object", "additionalProperties": True},
+        )
+        params = model.model_validate({"query": "hello", "limit": 3})
+        assert params.model_dump() == {"query": "hello", "limit": 3}
+
+    def test_complex_json_schema_is_enforced_without_losing_shape(self) -> None:
+        from myclaude.mcp.tool_wrapper import _build_params_model
+
+        model = _build_params_model(
+            "Complex",
+            {
+                "type": "object",
+                "properties": {
+                    "value": {
+                        "oneOf": [
+                            {"type": "integer"},
+                            {
+                                "type": "object",
+                                "properties": {"name": {"type": "string"}},
+                                "required": ["name"],
+                                "additionalProperties": False,
+                            },
+                        ]
+                    },
+                    "mode": {"enum": ["fast", "safe"]},
+                },
+                "required": ["value", "mode"],
+                "additionalProperties": False,
+            },
+        )
+
+        params = model.model_validate(
+            {"value": {"name": "mew"}, "mode": "safe"}
+        )
+        assert params.model_dump() == {
+            "value": {"name": "mew"},
+            "mode": "safe",
+        }
+        with pytest.raises(ValidationError):
+            model.model_validate({"value": {"wrong": True}, "mode": "other"})
 
 # ===========================================================================
 # _extract_text

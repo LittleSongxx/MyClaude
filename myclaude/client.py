@@ -16,6 +16,7 @@ from openai import AsyncOpenAI
 from myclaude.config import ProviderConfig
 from myclaude.conversation import ConversationManager
 from myclaude.model_capabilities import resolve_model_capabilities
+from myclaude.provider_state import ProviderContinuationState
 from myclaude.serialization import (
     build_anthropic_messages,
     build_chat_completion_messages,
@@ -435,13 +436,20 @@ class OpenAIClient(LLMClient):
     ) -> AsyncIterator[StreamEvent]:
         import openai as _openai
 
-        input_messages = build_openai_input(conversation.get_messages())
+        input_messages = build_openai_input(
+            conversation.get_messages(),
+            conversation.provider_state,
+        )
+        assistant_turn = sum(
+            1 for message in conversation.history if message.role == "assistant"
+        )
 
         kwargs: dict[str, Any] = {
             "model": self.model,
             "input": input_messages,
             "stream": True,
             "max_output_tokens": self.max_output_tokens,
+            "include": ["reasoning.encrypted_content"],
         }
         if system:
             kwargs["instructions"] = system
@@ -451,6 +459,7 @@ class OpenAIClient(LLMClient):
         active_calls: dict[str, dict[str, Any]] = {}
         reasoning_id = ""
         reasoning_text = ""
+        opaque_reasoning: dict[str, dict[str, Any]] = {}
         emitted_tool_call = False
         terminal_emitted = False
 
@@ -460,6 +469,44 @@ class OpenAIClient(LLMClient):
                 return str(item_id)
             output_index = getattr(event, "output_index", None)
             return f"index:{output_index}" if output_index is not None else "default"
+
+        def jsonable(value: Any) -> Any:
+            if hasattr(value, "model_dump"):
+                return value.model_dump(mode="json", exclude_none=True)
+            if isinstance(value, dict):
+                return {str(k): jsonable(v) for k, v in value.items()}
+            if isinstance(value, (list, tuple)):
+                return [jsonable(v) for v in value]
+            if hasattr(value, "__dict__"):
+                return {
+                    key: jsonable(item)
+                    for key, item in vars(value).items()
+                    if not key.startswith("_") and item is not None
+                }
+            return value
+
+        def capture_reasoning_item(item: Any, event: Any) -> None:
+            if item is None or getattr(item, "type", "") != "reasoning":
+                return
+            key = str(getattr(item, "id", "")) or event_call_key(event)
+            dumped = jsonable(item)
+            if isinstance(dumped, dict):
+                opaque_reasoning[key] = dumped
+
+        def record_continuation(resp: Any) -> None:
+            response_id = getattr(resp, "id", None) if resp is not None else None
+            items = list(opaque_reasoning.values())
+            if not response_id and not items:
+                return
+            state = conversation.provider_state
+            if state is None or state.provider != "openai":
+                state = ProviderContinuationState(provider="openai")
+                conversation.provider_state = state
+            state.record_turn(
+                assistant_turn,
+                response_id=str(response_id) if response_id else None,
+                opaque_items=items,
+            )
 
         try:
             response_stream = await self._client.responses.create(**kwargs)
@@ -529,9 +576,13 @@ class OpenAIClient(LLMClient):
                     elif item and getattr(item, "type", "") == "reasoning":
                         reasoning_id = getattr(item, "id", "")
                         reasoning_text = ""
+                        capture_reasoning_item(item, event)
+                elif event.type == "response.output_item.done":
+                    capture_reasoning_item(getattr(event, "item", None), event)
                 elif event.type == "response.completed":
                     terminal_emitted = True
                     resp = getattr(event, "response", None)
+                    record_continuation(resp)
                     usage = getattr(resp, "usage", None) if resp else None
                     # Responses API 通过 input_tokens_details.cached_tokens
                     # 暴露 cache 命中数，没有 creation 计数。注意这里的
@@ -550,6 +601,7 @@ class OpenAIClient(LLMClient):
                 elif event.type == "response.incomplete":
                     terminal_emitted = True
                     resp = getattr(event, "response", None)
+                    record_continuation(resp)
                     usage = getattr(resp, "usage", None) if resp else None
                     details = getattr(usage, "input_tokens_details", None)
                     cache_read = getattr(details, "cached_tokens", 0) or 0

@@ -7,7 +7,7 @@ import pytest
 
 from myclaude.client import AnthropicClient, OpenAIClient, OpenAICompatClient
 from myclaude.config import ProviderConfig
-from myclaude.conversation import ConversationManager
+from myclaude.conversation import ConversationManager, ThinkingBlock
 from myclaude.tools.base import StreamEnd, ToolCallComplete, ToolCallStart
 
 
@@ -170,6 +170,90 @@ async def test_responses_client_keeps_parallel_tool_calls_separate() -> None:
 
 
 @pytest.mark.asyncio
+async def test_responses_client_captures_and_replays_opaque_reasoning() -> None:
+    reasoning_item = SimpleNamespace(
+        type="reasoning",
+        id="rs-1",
+        encrypted_content="opaque-token",
+        summary=[
+            SimpleNamespace(type="summary_text", text="provider summary")
+        ],
+    )
+    usage = SimpleNamespace(
+        input_tokens=4,
+        output_tokens=2,
+        input_tokens_details=SimpleNamespace(cached_tokens=0),
+    )
+    batches = [
+        [
+            SimpleNamespace(
+                type="response.output_item.added",
+                item=reasoning_item,
+                output_index=0,
+            ),
+            SimpleNamespace(
+                type="response.output_item.done",
+                item=reasoning_item,
+                output_index=0,
+            ),
+            SimpleNamespace(
+                type="response.completed",
+                response=SimpleNamespace(id="resp-1", usage=usage),
+            ),
+        ],
+        [
+            SimpleNamespace(
+                type="response.completed",
+                response=SimpleNamespace(id="resp-2", usage=usage),
+            ),
+        ],
+    ]
+
+    class Responses:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        async def create(self, **kwargs: Any) -> AsyncEvents:
+            batch = batches[len(self.calls)]
+            self.calls.append(kwargs)
+            return AsyncEvents(batch)
+
+    responses = Responses()
+    client = OpenAIClient(_config("openai"))
+    client._client = SimpleNamespace(responses=responses)
+    conversation = ConversationManager()
+    conversation.add_user_message("think")
+
+    await _collect(client.stream(conversation))
+
+    assert conversation.provider_state is not None
+    first_turn = conversation.provider_state.get_turn(0)
+    assert first_turn is not None
+    assert first_turn.response_id == "resp-1"
+    assert first_turn.opaque_items == [{
+        "type": "reasoning",
+        "id": "rs-1",
+        "encrypted_content": "opaque-token",
+        "summary": [{
+            "type": "summary_text",
+            "text": "provider summary",
+        }],
+    }]
+
+    conversation.add_assistant_message(
+        "answer",
+        thinking_blocks=[ThinkingBlock("fallback", "fallback-id")],
+    )
+    conversation.add_user_message("continue")
+    await _collect(client.stream(conversation))
+
+    second_input = responses.calls[1]["input"]
+    assert second_input[1] == first_turn.opaque_items[0]
+    assert all(item.get("id") != "fallback-id" for item in second_input)
+    assert responses.calls[0]["include"] == ["reasoning.encrypted_content"]
+
+
+@pytest.mark.asyncio
 async def test_compat_client_marks_malformed_tool_json_and_always_terminates() -> None:
     first_delta = SimpleNamespace(
         content=None,
@@ -217,3 +301,7 @@ async def test_compat_client_marks_malformed_tool_json_and_always_terminates() -
     end = events[-1]
     assert isinstance(end, StreamEnd)
     assert end.stop_reason == "tool_use"
+
+
+async def _collect(stream):
+    return [event async for event in stream]

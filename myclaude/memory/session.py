@@ -21,10 +21,11 @@ from myclaude.conversation import (
     ToolResultBlock,
     ToolUseBlock,
 )
+from myclaude.provider_state import ProviderContinuationState
 from myclaude.tools.file_io import atomic_write_text
 
 SESSIONS_DIR = ".myclaude/sessions"
-SESSION_SCHEMA_VERSION = 1
+SESSION_SCHEMA_VERSION = 2
 DEFAULT_MAX_AGE_DAYS = 30
 TITLE_MAX_LENGTH = 50
 
@@ -59,6 +60,7 @@ class SessionRecord:
     timestamp: datetime
     tool_use_id: str | None = None
     is_error: bool = False
+    source: str = ""
     schema_version: int = SESSION_SCHEMA_VERSION
 
     def to_jsonl(self) -> str:
@@ -72,6 +74,8 @@ class SessionRecord:
             data["tool_use_id"] = self.tool_use_id
         if self.type == RecordType.TOOL_RESULT:
             data["is_error"] = self.is_error
+        if self.source:
+            data["source"] = self.source
         return json.dumps(data, ensure_ascii=False)
 
 
@@ -88,6 +92,7 @@ class SessionRecord:
                 timestamp=datetime.fromisoformat(data["timestamp"]),
                 tool_use_id=data.get("tool_use_id"),
                 is_error=data.get("is_error", False),
+                source=data.get("source", ""),
                 schema_version=data["schema_version"],
             )
         except (OSError, json.JSONDecodeError, KeyError, ValueError):
@@ -108,6 +113,7 @@ class SessionRecord:
                         timestamp=now,
                         tool_use_id=tr.tool_use_id,
                         is_error=tr.is_error,
+                        source="tool_result",
                     )
                 )
         elif message.role == "assistant":
@@ -133,15 +139,30 @@ class SessionRecord:
                         }
                     )
                 records.append(
-                    cls(type=RecordType.ASSISTANT, content=content_blocks, timestamp=now)
+                    cls(
+                        type=RecordType.ASSISTANT,
+                        content=content_blocks,
+                        timestamp=now,
+                        source=message.source or "assistant",
+                    )
                 )
             else:
                 records.append(
-                    cls(type=RecordType.ASSISTANT, content=message.content, timestamp=now)
+                    cls(
+                        type=RecordType.ASSISTANT,
+                        content=message.content,
+                        timestamp=now,
+                        source=message.source or "assistant",
+                    )
                 )
         else:
             records.append(
-                cls(type=RecordType.USER, content=message.content, timestamp=now)
+                cls(
+                    type=RecordType.USER,
+                    content=message.content,
+                    timestamp=now,
+                    source=message.source or "user",
+                )
             )
 
         return records
@@ -159,7 +180,8 @@ def _migrate_record_data(data: dict[str, Any]) -> dict[str, Any]:
         # Accept the old optional `kind` spelling from early development files.
         if "type" not in migrated and "kind" in migrated:
             migrated["type"] = migrated.pop("kind")
-        migrated["schema_version"] = 1
+    if version < SESSION_SCHEMA_VERSION:
+        migrated["schema_version"] = SESSION_SCHEMA_VERSION
     return migrated
 
 
@@ -187,6 +209,8 @@ def _message_to_record_dicts(message: Message) -> list[dict[str, Any]]:
             data["tool_use_id"] = rec.tool_use_id
         if rec.type == RecordType.TOOL_RESULT:
             data["is_error"] = rec.is_error
+        if rec.source:
+            data["source"] = rec.source
         dicts.append(data)
     return dicts
 
@@ -232,6 +256,7 @@ def parse_compact_boundary(record: SessionRecord) -> tuple[str, list[Message]]:
                     timestamp=record.timestamp,
                     tool_use_id=item.get("tool_use_id"),
                     is_error=item.get("is_error", False),
+                    source=item.get("source", ""),
                     schema_version=item.get("schema_version", SESSION_SCHEMA_VERSION),
                 )
             )
@@ -266,7 +291,12 @@ def records_to_messages(records: list[SessionRecord]) -> list[Message]:
 
         if pending_tool_results:
             messages.append(
-                Message(role="user", content="", tool_results=pending_tool_results)
+                Message(
+                    role="user",
+                    content="",
+                    tool_results=pending_tool_results,
+                    source="tool_result",
+                )
             )
             pending_tool_results = []
 
@@ -278,6 +308,7 @@ def records_to_messages(records: list[SessionRecord]) -> list[Message]:
                 Message(
                     role="user",
                     content="本次会话延续自之前的对话，因上下文空间不足进行了压缩。以下是早期对话的摘要：\n\n" + (record.content or ""),
+                    source="system_reminder",
                 )
             )
             continue
@@ -288,12 +319,25 @@ def records_to_messages(records: list[SessionRecord]) -> list[Message]:
             # 权威的那一条；但在此展开可以保证 records_to_messages 对任何
             # 直接调用者都保持自洽。
             summary, keep_messages = parse_compact_boundary(record)
-            messages.append(Message(role="user", content="本次会话延续自之前的对话，因上下文空间不足进行了压缩。以下是早期对话的摘要：\n\n" + summary))
+            messages.append(
+                Message(
+                    role="user",
+                    content="本次会话延续自之前的对话，因上下文空间不足进行了压缩。以下是早期对话的摘要：\n\n"
+                    + summary,
+                    source="system_reminder",
+                )
+            )
             messages.extend(keep_messages)
             continue
 
         if record.type == RecordType.USER:
-            messages.append(Message(role="user", content=record.content or ""))
+            messages.append(
+                Message(
+                    role="user",
+                    content=record.content or "",
+                    source=record.source or "user",
+                )
+            )
         elif record.type == RecordType.ASSISTANT:
             if isinstance(record.content, list):
                 text = ""
@@ -325,16 +369,26 @@ def records_to_messages(records: list[SessionRecord]) -> list[Message]:
                         content=text,
                         tool_uses=tool_uses,
                         thinking_blocks=thinking_blocks,
+                        source=record.source or "assistant",
                     )
                 )
             else:
                 messages.append(
-                    Message(role="assistant", content=record.content or "")
+                    Message(
+                        role="assistant",
+                        content=record.content or "",
+                        source=record.source or "assistant",
+                    )
                 )
 
     if pending_tool_results:
         messages.append(
-            Message(role="user", content="", tool_results=pending_tool_results)
+            Message(
+                role="user",
+                content="",
+                tool_results=pending_tool_results,
+                source="tool_result",
+            )
         )
 
     return messages
@@ -379,6 +433,7 @@ class SessionMeta:
     summary: str = ""
     message_count: int = 0
     total_tokens: int = 0
+    provider_state: dict[str, Any] | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     last_active: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -390,6 +445,7 @@ class SessionMeta:
             "summary": self.summary,
             "message_count": self.message_count,
             "total_tokens": self.total_tokens,
+            "provider_state": self.provider_state,
             "created_at": self.created_at.isoformat(),
             "last_active": self.last_active.isoformat(),
         }
@@ -416,6 +472,11 @@ class SessionMeta:
                 summary=data.get("summary", ""),
                 message_count=data.get("message_count", 0),
                 total_tokens=data.get("total_tokens", 0),
+                provider_state=(
+                    data.get("provider_state")
+                    if isinstance(data.get("provider_state"), dict)
+                    else None
+                ),
                 created_at=datetime.fromisoformat(data["created_at"]),
                 last_active=datetime.fromisoformat(data["last_active"]),
             )
@@ -450,9 +511,21 @@ class Session:
         self.meta.message_count += 1
         self.meta.last_active = datetime.now(timezone.utc)
 
-        if not self.meta.title and message.role == "user" and message.content:
+        if (
+            not self.meta.title
+            and message.role == "user"
+            and message.source in ("", "user")
+            and message.content
+        ):
             self.meta.title = message.content[:TITLE_MAX_LENGTH]
 
+        self.meta.save(self._sessions_dir / f"{self.session_id}.meta")
+
+    def update_provider_state(
+        self, state: ProviderContinuationState | None
+    ) -> None:
+        self.meta.provider_state = state.to_dict() if state is not None else None
+        self.meta.last_active = datetime.now(timezone.utc)
         self.meta.save(self._sessions_dir / f"{self.session_id}.meta")
 
     def append_record(self, record: SessionRecord) -> None:
@@ -484,6 +557,7 @@ class ResumeResult:
     session: Session
     messages: list[Message]
     last_active: datetime
+    provider_state: ProviderContinuationState | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -624,6 +698,11 @@ class SessionManager:
             session=session,
             messages=messages,
             last_active=meta.last_active,
+            provider_state=ProviderContinuationState.from_dict(
+                meta.provider_state
+            )
+            if meta.provider_state is not None
+            else None,
         )
 
     def delete(self, session_id: str) -> bool:

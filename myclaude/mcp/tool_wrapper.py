@@ -6,8 +6,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from jsonschema import validators
 from mcp import types as mcp_types
-from pydantic import BaseModel, create_model
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from myclaude.mcp.client import MCPClient
 from myclaude.tools.base import Tool, ToolResult
@@ -16,30 +17,28 @@ from myclaude.tools.base import Tool, ToolResult
 def _build_params_model(
     tool_name: str, input_schema: dict[str, Any]
 ) -> type[BaseModel]:
-    properties = input_schema.get("properties", {})
-    required = set(input_schema.get("required", []))
+    validator_cls = validators.validator_for(input_schema)
+    validator_cls.check_schema(input_schema)
+    schema_validator = validator_cls(input_schema)
 
-    field_definitions: dict[str, Any] = {}
-    for name, prop in properties.items():
-        py_type = _json_type_to_python(prop.get("type", "string"))
-        if name in required:
-            field_definitions[name] = (py_type, ...)
-        else:
-            field_definitions[name] = (py_type | None, None)
+    class MCPParams(BaseModel):
+        model_config = ConfigDict(extra="allow")
 
-    return create_model(f"{tool_name}Params", **field_definitions)
+        @model_validator(mode="before")
+        @classmethod
+        def validate_json_schema(cls, value: Any) -> Any:
+            errors = sorted(
+                schema_validator.iter_errors(value),
+                key=lambda error: [str(part) for part in error.absolute_path],
+            )
+            if errors:
+                details = "; ".join(error.message for error in errors[:3])
+                raise ValueError(f"JSON Schema validation failed: {details}")
+            return value
 
-
-def _json_type_to_python(json_type: str) -> type:
-    mapping: dict[str, type] = {
-        "string": str,
-        "integer": int,
-        "number": float,
-        "boolean": bool,
-        "object": dict,
-        "array": list,
-    }
-    return mapping.get(json_type, str)
+    MCPParams.__name__ = f"{tool_name}Params"
+    MCPParams.__qualname__ = MCPParams.__name__
+    return MCPParams
 
 
 def _extract_text(content: list[Any]) -> str:

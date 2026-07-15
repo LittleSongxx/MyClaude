@@ -20,7 +20,10 @@ from myclaude.skills.loader import SkillLoader
 from myclaude.teams.manager import TeamManager
 from myclaude.tools import ToolRegistry
 from myclaude.tools.agent_tool import AgentTool
+from myclaude.tools.ask_user import AskUserTool
+from myclaude.tools.exit_plan_mode import ExitPlanModeTool
 from myclaude.tools.impl.tool_search import ToolSearchTool
+from myclaude.tools.install_skill import InstallSkillTool
 from myclaude.tools.load_skill import LoadSkill
 from myclaude.tools.synthetic_output import SyntheticOutputTool
 from myclaude.tools.team_create import TeamCreateTool
@@ -33,6 +36,9 @@ class StandardFeatures:
     core: CoreRuntime
     skill_loader: SkillLoader
     load_skill_tool: LoadSkill
+    install_skill_tool: InstallSkillTool
+    ask_user_tool: AskUserTool | None
+    exit_plan_tool: ExitPlanModeTool
     agent_loader: AgentLoader
     task_manager: TaskManager
     trace_manager: TraceManager
@@ -179,6 +185,21 @@ class RuntimeAssembler:
         registry.register(load_skill_tool)
         core.agent.set_skill_catalog(_skill_catalog(skill_loader))
 
+        install_skill_tool = InstallSkillTool()
+        install_skill_tool.set_loader(skill_loader)
+        registry.register(install_skill_tool)
+
+        ask_user_tool: AskUserTool | None = None
+        if interactive:
+            ask_user_tool = AskUserTool()
+            registry.register(ask_user_tool)
+
+        exit_plan_tool = ExitPlanModeTool(
+            is_plan_mode=lambda: core.agent.plan_mode,
+            plan_exists=lambda: core.agent._get_plan_path().exists(),
+        )
+        registry.register(exit_plan_tool)
+
         task_manager = task_manager or TaskManager()
         trace_manager = trace_manager or TraceManager()
         agent_loader = AgentLoader(
@@ -226,6 +247,9 @@ class RuntimeAssembler:
             core=core,
             skill_loader=skill_loader,
             load_skill_tool=load_skill_tool,
+            install_skill_tool=install_skill_tool,
+            ask_user_tool=ask_user_tool,
+            exit_plan_tool=exit_plan_tool,
             agent_loader=agent_loader,
             task_manager=task_manager,
             trace_manager=trace_manager,

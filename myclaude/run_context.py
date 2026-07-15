@@ -92,6 +92,11 @@ class RunContext:
         # remaining 可能为 0.0；asyncio.timeout(0) 会在首个挂起点立即超时。
         return asyncio.timeout(remaining)
 
+    async def wait_for(self, awaitable: Awaitable[T]) -> T:
+        """Await one operation without allowing it to exceed the run deadline."""
+        async with self.timeout_scope():
+            return await awaitable
+
     async def sleep(self, seconds: float) -> bool:
         """睡眠至多 ``seconds``，但绝不睡过 deadline。
 

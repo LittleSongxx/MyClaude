@@ -372,6 +372,10 @@ function handleMessage(msg) {
       addAskUserDialog(msg.data);
       break;
 
+    case 'plan_approval':
+      addPlanApprovalDialog(msg.data);
+      break;
+
     case 'turn_complete':
       break;
 
@@ -621,55 +625,85 @@ function addAskUserDialog(data) {
 
   let html = '<div class="title">❓ Question</div>';
   const questions = data.questions || [];
+  div.dataset.names = JSON.stringify(questions.map((q, i) => q.name || ('question_' + i)));
+  div.dataset.types = JSON.stringify(questions.map(q => q.type || 'text'));
   questions.forEach((q, qi) => {
     html += '<div style="margin-bottom:12px;">';
-    html += '<div style="margin-bottom:6px;color:var(--text-bright);">' + escapeHtml(q.question || q.Text || '') + '</div>';
+    html += '<div style="margin-bottom:6px;color:var(--text-bright);">' + escapeHtml(q.message || q.question || '') + '</div>';
     const options = q.options || q.Options || [];
-    options.forEach((opt, oi) => {
-      const label = opt.label || opt.Label || '';
-      const desc = opt.description || opt.Description || '';
+    if ((q.type || 'text') === 'text' || options.length === 0) {
+      html += '<input type="text" id="ask_text_' + data.id + '_' + qi + '" style="background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px 8px;font-family:inherit;font-size:13px;width:min(420px,90%);">';
+    }
+    options.forEach((opt) => {
+      const label = typeof opt === 'string' ? opt : (opt.label || opt.Label || '');
+      const desc = typeof opt === 'string' ? '' : (opt.description || opt.Description || '');
+      const inputType = (q.type === 'checkbox') ? 'checkbox' : 'radio';
       html += '<label style="display:block;margin:4px 0;cursor:pointer;">' +
-        '<input type="radio" name="ask_' + data.id + '_' + qi + '" value="' + escapeHtml(label) + '"> ' +
+        '<input type="' + inputType + '" name="ask_' + data.id + '_' + qi + '" value="' + escapeHtml(label) + '"> ' +
         '<span style="color:var(--blue)">' + escapeHtml(label) + '</span>' +
         (desc ? ' <span style="color:var(--text-dim);font-size:12px;">— ' + escapeHtml(desc) + '</span>' : '') +
         '</label>';
     });
-    // Other 选项
-    html += '<label style="display:block;margin:4px 0;cursor:pointer;">' +
-      '<input type="radio" name="ask_' + data.id + '_' + qi + '" value="__other__"> ' +
-      '<span style="color:var(--text-dim)">Other: </span>' +
-      '<input type="text" id="ask_other_' + data.id + '_' + qi + '" style="background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-family:inherit;font-size:13px;width:300px;">' +
-      '</label>';
     html += '</div>';
   });
-  html += '<div class="actions"><button class="btn-allow" onclick="respondAsk(\'' + data.id + '\',' + questions.length + ')">Submit</button></div>';
+  html += '<div class="actions"><button class="btn-allow" onclick="respondAsk(\'' + data.id + '\')">Submit</button></div>';
 
   div.innerHTML = html;
   messagesEl.appendChild(div);
   scrollToBottom();
 }
 
-function respondAsk(id, qCount) {
+function respondAsk(id) {
   const answers = {};
-  for (let i = 0; i < qCount; i++) {
-    const radios = document.querySelectorAll('input[name="ask_' + id + '_' + i + '"]');
-    let val = '';
-    radios.forEach(r => {
-      if (r.checked) {
-        if (r.value === '__other__') {
-          val = document.getElementById('ask_other_' + id + '_' + i).value;
-        } else {
-          val = r.value;
-        }
-      }
+  const el = document.getElementById('ask-' + id);
+  const names = JSON.parse(el.dataset.names || '[]');
+  const types = JSON.parse(el.dataset.types || '[]');
+  for (let i = 0; i < names.length; i++) {
+    if (types[i] === 'text') {
+      const input = document.getElementById('ask_text_' + id + '_' + i);
+      answers[names[i]] = input ? input.value : '';
+      continue;
+    }
+    const inputs = document.querySelectorAll('input[name="ask_' + id + '_' + i + '"]');
+    const selected = [];
+    inputs.forEach(input => {
+      if (input.checked) selected.push(input.value);
     });
-    answers['question_' + i] = val;
+    answers[names[i]] = types[i] === 'checkbox' ? selected.join(', ') : (selected[0] || '');
   }
   ws.send(JSON.stringify({ type: 'ask_user_response', data: { id, answers } }));
-  const el = document.getElementById('ask-' + id);
   if (el) {
     el.innerHTML = '<div style="color:var(--text-dim)">✓ Answered</div>';
   }
+}
+
+function addPlanApprovalDialog(data) {
+  const div = document.createElement('div');
+  div.className = 'perm-dialog';
+  div.id = 'plan-approval';
+  div.innerHTML =
+    '<div class="title">Plan ready for approval</div>' +
+    '<div style="max-height:260px;overflow:auto;white-space:pre-wrap;color:var(--text);margin-bottom:12px;">' +
+      escapeHtml(data.plan || '(plan file is empty)') +
+    '</div>' +
+    '<textarea id="plan-feedback" placeholder="Feedback for another planning pass" style="width:100%;min-height:70px;background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:8px;font-family:inherit;"></textarea>' +
+    '<div class="actions">' +
+      '<button class="btn-allow" onclick="respondPlan(\'manual\')">Approve</button>' +
+      '<button class="btn-always" onclick="respondPlan(\'bypass\')">Approve &amp; Auto-allow</button>' +
+      '<button class="btn-deny" onclick="respondPlan(\'feedback\')">Send feedback</button>' +
+    '</div>';
+  messagesEl.appendChild(div);
+  scrollToBottom();
+}
+
+function respondPlan(choice) {
+  const feedback = document.getElementById('plan-feedback');
+  ws.send(JSON.stringify({
+    type: 'plan_response',
+    data: { choice, feedback: feedback ? feedback.value : '' }
+  }));
+  const el = document.getElementById('plan-approval');
+  if (el) el.innerHTML = '<div style="color:var(--text-dim)">Plan response sent</div>';
 }
 
 // 滚动控制

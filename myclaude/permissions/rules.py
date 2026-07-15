@@ -15,8 +15,9 @@ import yaml
 from myclaude.tools.file_io import atomic_write_text, locked_path
 
 Effect = Literal["allow", "deny", "ask"]
+MatchMode = Literal["glob", "literal"]
 
-_RULE_RE = re.compile(r"^(\w+)\((.+)\)$")
+_RULE_RE = re.compile(r"^(\w+)\((.+)\)$", re.DOTALL)
 
 _CONTENT_FIELDS: dict[str, str] = {
     "Bash": "command",
@@ -43,11 +44,14 @@ class Rule:
     tool_name: str
     pattern: str
     effect: Effect
+    match: MatchMode = "glob"
 
 
     def matches(self, tool_name: str, content: str) -> bool:
         if self.tool_name != tool_name:
             return False
+        if self.match == "literal":
+            return content == self.pattern
         return fnmatch(content, self.pattern)
 
 
@@ -95,10 +99,21 @@ def _load_rules_file(path: Path) -> list[Rule]:
             continue
         rule_str = entry.get("rule", "")
         effect = entry.get("effect", "")
+        match = entry.get("match", "glob")
         if effect not in ("allow", "deny", "ask"):
             continue
+        if match not in ("glob", "literal"):
+            continue
         try:
-            rules.append(parse_rule(rule_str, effect))
+            parsed = parse_rule(rule_str, effect)
+            rules.append(
+                Rule(
+                    tool_name=parsed.tool_name,
+                    pattern=parsed.pattern,
+                    effect=parsed.effect,
+                    match=match,
+                )
+            )
         except ValueError:
             continue
     return rules
@@ -141,7 +156,14 @@ class RuleEngine:
         with locked_path(self._local_path):
             existing = _load_rules_file(self._local_path)
             existing.append(rule)
-            entries = [{"rule": f"{r.tool_name}({r.pattern})", "effect": r.effect} for r in existing]
+            entries = [
+                {
+                    "rule": f"{r.tool_name}({r.pattern})",
+                    "effect": r.effect,
+                    "match": r.match,
+                }
+                for r in existing
+            ]
             atomic_write_text(
                 self._local_path, yaml.dump(entries, allow_unicode=True)
             )

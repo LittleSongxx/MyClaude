@@ -2,9 +2,9 @@
 # 后端八股网站：xiaolincoding.com
 # Agent网站：xiaolinnote.com
 # 简历模版：jianli.xiaolinnote.com
-"""Provider continuation state：把「给人看的对话」与「Provider 要求回传的不透明状态」分层。
+"""Provider continuation state for opaque provider-owned response items.
 
-报告 A3。不同 Provider 的会话状态不是通用聊天消息：
+Different providers have genuinely different continuation protocols:
 
 - Anthropic Messages、OpenAI Responses、Chat Completions 在 reasoning、tool call、
   continuation 上有真实协议差异。
@@ -12,11 +12,7 @@
   多轮 reasoning + tool calling 时 Provider 可能要求把**原样**的 reasoning item 回传，
   而不是把它降级成 summary 文本再伪造一个回去。
 
-当前实现（``serialization.build_openai_input``）正是"用 summary 文本 + id 伪造 reasoning
-item"。这在默认配置下不出问题（默认根本没开 reasoning summary，什么都不回传），但一旦
-将来开启 reasoning 参数，伪造的 item 就可能被 Provider 拒绝。
-
-这个模块提供一个**版本化的状态容器**，把设计意图固化下来：
+This module provides a versioned state container:
 
 - canonical conversation（``ConversationManager``）继续保存面向 UI / 压缩 / 跨 Provider
   展示的通用消息——这部分不变。
@@ -24,9 +20,6 @@ item"。这在默认配置下不出问题（默认根本没开 reasoning summary
   通用文本；需要 continuation 时优先回传它，或使用 ``previous_response_id``。
 - 持久化带 ``schema_version``：遇到未知版本安全降级（丢弃 opaque 状态、退回纯 canonical
   重建），而不是猜测性地重建可能已不兼容的结构。
-
-它是一个可独立测试的领域对象，不依赖具体 client；wiring 到 serialization 时只需在 assistant
-turn 优先取 ``opaque_items``、缺失时退回现有的 summary 重建路径（见模块末尾 wiring 说明）。
 """
 from __future__ import annotations
 
@@ -155,25 +148,3 @@ class ProviderContinuationState:
                 opaque_items=items if isinstance(items, list) else None,
             )
         return state
-
-
-# ---------------------------------------------------------------------------
-# Wiring 说明（供后续接入 serialization / client，不在本模块内改动全局行为）
-# ---------------------------------------------------------------------------
-#
-# 接入点在 assistant turn 的 provider input 构建（serialization.build_openai_input）：
-#
-#   turn_state = provider_state.get_turn(turn_index)
-#   if turn_state and turn_state.opaque_items:
-#       result.extend(turn_state.opaque_items)          # 原样回传，不伪造
-#   else:
-#       ... 现有的 summary-文本重建路径（向后兼容）...
-#
-# 在线会话则优先用 provider_state.latest_response_id() 走 previous_response_id，
-# 避免回传大段 opaque 状态。client.stream 在收到 Responses typed items 时，用
-# provider_state.record_turn(turn_index, response_id=..., opaque_items=[原样 item])
-# 记录。持久化时存 to_dict()，读回时用 from_dict() —— 未知版本自动降级到纯 canonical。
-#
-# 之所以先落地为独立、版本化、可测试的领域对象而不直接改写 serialization：当前默认配置
-# 不开 reasoning summary，改写主链路对 demo 无实际收益却有回归风险；而这个对象已经把
-# "canonical 与 opaque 分层 + 版本化安全降级"的设计固化并可在面试中讲清楚。

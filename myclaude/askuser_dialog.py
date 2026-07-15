@@ -56,6 +56,22 @@ class InlineAskUserWidget(Vertical, can_focus=True):
     def _option_count(self, q_idx: int) -> int:
         return len(self._questions[q_idx].get("options", [])) + 1  # +1 是为 Other 选项预留的
 
+    @staticmethod
+    def _answer_key(question: dict, index: int) -> str:
+        return str(
+            question.get("name")
+            or question.get("question")
+            or question.get("message")
+            or f"q{index}"
+        )
+
+    @staticmethod
+    def _is_multi(question: dict) -> bool:
+        return bool(
+            question.get("multiSelect", False)
+            or question.get("type") == "checkbox"
+        )
+
     def _build_content(self) -> str:
         if self._on_submit:
             return self._render_submit()
@@ -75,7 +91,7 @@ class InlineAskUserWidget(Vertical, can_focus=True):
         lines.append(f" [bold color(99)]{header}[/]\n")
 
         options = q.get("options", [])
-        is_multi = q.get("multiSelect", False)
+        is_multi = self._is_multi(q)
         cursor = self._cursors[self._q_idx]
 
         for i, opt in enumerate(options):
@@ -152,7 +168,7 @@ class InlineAskUserWidget(Vertical, can_focus=True):
         q = self._questions[self._q_idx]
         options = q.get("options", [])
         cursor = self._cursors[self._q_idx]
-        is_multi = q.get("multiSelect", False)
+        is_multi = self._is_multi(q)
 
         if cursor == len(options):  # "Other"（自定义输入）
             self._answered[self._q_idx] = self._others[self._q_idx] or "Other"
@@ -215,7 +231,7 @@ class InlineAskUserWidget(Vertical, can_focus=True):
         if self._on_submit:
             return
         q = self._questions[self._q_idx]
-        if not q.get("multiSelect", False):
+        if not self._is_multi(q):
             return
         cursor = self._cursors[self._q_idx]
         options = q.get("options", [])
@@ -228,7 +244,7 @@ class InlineAskUserWidget(Vertical, can_focus=True):
             if self._submit_idx == 0:
                 answers = {}
                 for i, q in enumerate(self._questions):
-                    key = q.get("question", q.get("message", f"q{i}"))
+                    key = self._answer_key(q, i)
                     answers[key] = self._answered.get(i, "")
                 self.post_message(self.Responded(answers))
             else:
@@ -238,7 +254,7 @@ class InlineAskUserWidget(Vertical, can_focus=True):
             if len(self._questions) == 1:
                 answers = {}
                 q = self._questions[0]
-                key = q.get("question", q.get("message", "q0"))
+                key = self._answer_key(q, 0)
                 answers[key] = self._answered.get(0, "")
                 self.post_message(self.Responded(answers))
             elif self._q_idx < len(self._questions) - 1:

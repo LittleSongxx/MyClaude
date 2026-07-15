@@ -16,6 +16,7 @@ from myclaude.agent import (
     CompactNotification,
     ErrorEvent,
     LoopComplete,
+    PermissionRequest,
     StreamText,
     ToolResultEvent,
     ToolUseEvent,
@@ -34,6 +35,7 @@ from myclaude.memory.session import (
 )
 from myclaude.permissions import PermissionMode
 from myclaude.runtime_assembler import MCPFeatures, RuntimeAssembler
+from myclaude.runtime import create_permission_checker
 from myclaude.tools import ToolRegistry
 from myclaude.tools.base import (
     StreamEnd,
@@ -201,6 +203,69 @@ async def test_wall_time_limit_interrupts_model_wait(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_wall_time_limit_interrupts_permission_wait(tmp_path: Path) -> None:
+    client = SequenceClient([
+        [
+            ToolCallComplete("call-1", "SideEffect", {}),
+            StreamEnd("tool_use", 1, 1),
+        ]
+    ])
+    registry = ToolRegistry()
+    tool = SideEffectTool()
+    registry.register(tool)
+    checker = create_permission_checker(
+        str(tmp_path),
+        PermissionMode.DEFAULT,
+    )
+    conversation = ConversationManager()
+    conversation.add_user_message("run it")
+    agent = Agent(
+        client,
+        registry,
+        "anthropic",
+        work_dir=str(tmp_path),
+        permission_checker=checker,
+        run_limits=RunLimits(max_wall_time_seconds=0.02),
+    )
+
+    events = [event async for event in agent.run(conversation)]
+
+    assert any(isinstance(event, PermissionRequest) for event in events)
+    assert any(
+        isinstance(event, ErrorEvent) and "wall time" in event.message
+        for event in events
+    )
+    assert tool.executed is False
+
+
+@pytest.mark.asyncio
+async def test_wall_time_limit_includes_lifecycle_hooks(tmp_path: Path) -> None:
+    hook_engine = MagicMock()
+
+    async def slow_hook(*_args):
+        await asyncio.sleep(1)
+
+    hook_engine.run_hooks = slow_hook
+    hook_engine.drain_notifications.return_value = []
+    conversation = ConversationManager()
+    conversation.add_user_message("wait")
+    agent = Agent(
+        SequenceClient([[StreamEnd("end_turn", 1, 1)]]),
+        ToolRegistry(),
+        "anthropic",
+        work_dir=str(tmp_path),
+        hook_engine=hook_engine,
+        run_limits=RunLimits(max_wall_time_seconds=0.01),
+    )
+
+    events = [event async for event in agent.run(conversation)]
+
+    assert len(events) == 1
+    assert isinstance(events[0], ErrorEvent)
+    assert "wall time" in events[0].message
+
+
+@pytest.mark.asyncio
 async def test_message_queued_during_stream_becomes_next_turn(tmp_path: Path) -> None:
     class SteeringClient(LLMClient):
         def __init__(self) -> None:
@@ -341,12 +406,30 @@ def test_runtime_assembler_installs_same_standard_tool_surface(tmp_path: Path) -
     for name in (
         "ToolSearch",
         "LoadSkill",
+        "InstallSkill",
         "Agent",
         "TeamCreate",
         "TeamDelete",
         "SyntheticOutput",
+        "ExitPlanMode",
     ):
         assert core.registry.get(name) is not None
+    assert core.registry.get("AskUserQuestion") is None
+
+    interactive = RuntimeAssembler(
+        provider,
+        PermissionMode.DEFAULT,
+        work_dir=str(tmp_path),
+        client=SequenceClient(
+            [[TextDelta("ok"), StreamEnd("end_turn", 1, 1)]]
+        ),
+    )
+    interactive_core = interactive.build_core()
+    interactive.install_standard_features(
+        interactive_core,
+        interactive=True,
+    )
+    assert interactive_core.registry.get("AskUserQuestion") is not None
 
 
 def test_usage_ledger_accounts_secondary_purposes_and_cost() -> None:
@@ -654,3 +737,57 @@ async def test_remote_prompt_command_schedules_agent_after_dispatch() -> None:
         await asyncio.sleep(0)
 
     start.assert_called_once_with("expanded: request")
+
+
+@pytest.mark.asyncio
+async def test_remote_ask_user_response_resolves_pending_future() -> None:
+    from myclaude.remote import RemoteServer
+
+    provider = ProviderConfig(
+        name="test",
+        protocol="anthropic",
+        base_url="https://example.invalid",
+        model="claude-test",
+    )
+    server = RemoteServer([provider])
+    future = asyncio.get_running_loop().create_future()
+    server._pending_asks["ask-1"] = future
+
+    server._handle_ask_user_response({
+        "id": "ask-1",
+        "answers": {"database": "PostgreSQL"},
+    })
+
+    assert await future == {"database": "PostgreSQL"}
+    assert "ask-1" not in server._pending_asks
+
+
+def test_remote_plan_approval_restores_mode_and_queues_execution(
+    tmp_path: Path,
+) -> None:
+    from myclaude.remote import RemoteServer
+
+    provider = ProviderConfig(
+        name="test",
+        protocol="anthropic",
+        base_url="https://example.invalid",
+        model="claude-test",
+    )
+    plan_path = tmp_path / "plan.md"
+    plan_path.write_text("1. Implement it", encoding="utf-8")
+    server = RemoteServer([provider])
+    server._pre_plan_mode = PermissionMode.DEFAULT
+    server.agent = SimpleNamespace(
+        set_permission_mode=MagicMock(),
+        _get_plan_path=lambda: plan_path,
+    )
+
+    with patch.object(server, "_start_after_current") as restart:
+        server._handle_plan_response({"choice": "manual"})
+
+    server.agent.set_permission_mode.assert_called_once_with(
+        PermissionMode.DEFAULT
+    )
+    execute_text = restart.call_args.args[0]
+    assert "User has approved your plan" in execute_text
+    assert "1. Implement it" in execute_text

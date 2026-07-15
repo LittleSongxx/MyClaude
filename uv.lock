@@ -492,6 +492,7 @@ source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
     { name = "httpx" },
+    { name = "jsonschema" },
     { name = "mcp" },
     { name = "openai" },
     { name = "pydantic" },
@@ -512,6 +513,7 @@ dev = [
 requires-dist = [
     { name = "anthropic", specifier = ">=0.42.0" },
     { name = "httpx", specifier = ">=0.27.0" },
+    { name = "jsonschema", specifier = ">=4.20.0" },
     { name = "mcp", specifier = ">=1.12.0" },
     { name = "openai", specifier = ">=1.60.0" },
     { name = "pydantic", specifier = ">=2.0" },

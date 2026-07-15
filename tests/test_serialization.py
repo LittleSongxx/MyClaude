@@ -17,6 +17,7 @@ from myclaude.conversation import (
     ToolResultBlock,
     ToolUseBlock,
 )
+from myclaude.provider_state import ProviderContinuationState
 from myclaude.serialization import (
     build_anthropic_messages,
     build_chat_completion_messages,
@@ -116,6 +117,28 @@ def test_openai_input_includes_reasoning_items():
     assert msgs[0]["type"] == "reasoning"
     assert msgs[0]["id"] == "rs-001"
     assert msgs[0]["summary"][0]["text"] == "reasoning here"
+
+
+def test_openai_input_prefers_opaque_provider_reasoning_items():
+    conv = ConversationManager()
+    conv.add_assistant_message(
+        "text",
+        thinking_blocks=[ThinkingBlock(thinking="fallback", signature="fallback-id")],
+    )
+    opaque = {
+        "type": "reasoning",
+        "id": "rs-provider",
+        "encrypted_content": "opaque-token",
+        "summary": [{"type": "summary_text", "text": "provider summary"}],
+    }
+    state = ProviderContinuationState(provider="openai")
+    state.record_turn(0, response_id="resp-1", opaque_items=[opaque])
+
+    msgs = build_openai_input(conv.get_messages(), state)
+
+    assert msgs[0] == opaque
+    assert all(item.get("id") != "fallback-id" for item in msgs)
+    assert msgs[0] is not opaque
 
 
 def test_build_messages_dispatch_by_protocol():

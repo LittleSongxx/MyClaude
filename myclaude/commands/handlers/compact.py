@@ -31,6 +31,9 @@ async def handle_compact(ctx: CommandContext) -> None:
             ctx.session.append_record(
                 make_compact_boundary(result.boundary.summary, result.boundary.keep)
             )
+            ctx.session.update_provider_state(
+                ctx.conversation.provider_state
+            )
         ctx.ui.add_system_message(result.message)
     elif isinstance(result, ErrorEvent):
         ctx.ui.add_system_message(f"压缩失败: {result.message}")

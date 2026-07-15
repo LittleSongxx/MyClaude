@@ -31,6 +31,7 @@ from myclaude.client import LLMClient
 from myclaude.conversation import ConversationManager
 from myclaude.serialization import build_anthropic_messages
 from myclaude.tools import ToolRegistry, create_default_registry
+from myclaude.tools.ask_user import AskUserEvent, AskUserTool
 from myclaude.tools.base import (
     StreamEnd,
     StreamEvent,
@@ -171,6 +172,50 @@ async def test_multi_step_autonomous():
     # 验证文件确实被创建了
     assert not c["tool_result"][0].is_error
     assert not c["tool_result"][1].is_error
+
+
+@pytest.mark.asyncio
+async def test_ask_user_is_emitted_as_first_class_agent_event():
+    client = MockLLMClient([
+        [
+            ToolCallComplete(
+                "ask-1",
+                "AskUserQuestion",
+                {
+                    "questions": [
+                        {
+                            "type": "radio",
+                            "name": "database",
+                            "message": "Choose a database",
+                            "options": ["PostgreSQL", "SQLite"],
+                        }
+                    ]
+                },
+            ),
+            StreamEnd("tool_use", input_tokens=10, output_tokens=5),
+        ],
+        [
+            TextDelta("Using PostgreSQL."),
+            StreamEnd("end_turn", input_tokens=20, output_tokens=5),
+        ],
+    ])
+    registry = create_default_registry()
+    registry.register(AskUserTool())
+    agent = Agent(client, registry, "anthropic", work_dir=".")
+    conv = ConversationManager()
+    conv.add_user_message("configure storage")
+
+    events = []
+    async for event in agent.run(conv):
+        events.append(event)
+        if isinstance(event, AskUserEvent):
+            event.future.set_result({"database": "PostgreSQL"})
+
+    assert any(isinstance(event, AskUserEvent) for event in events)
+    result = next(
+        event for event in events if isinstance(event, ToolResultEvent)
+    )
+    assert result.output == "database: PostgreSQL"
 
 @pytest.mark.asyncio
 async def test_stop_end_turn():
@@ -749,3 +794,59 @@ async def test_no_recall_fn_is_inert():
         pass
 
     assert agent.memory_recall_task is None
+
+
+@pytest.mark.asyncio
+async def test_recall_restarts_for_each_agent_run():
+    queries: list[str] = []
+
+    async def recall_fn(query: str) -> str:
+        queries.append(query)
+        return ""
+
+    client = MockLLMClient([
+        [TextDelta("one"), StreamEnd("end_turn", 1, 1)],
+        [TextDelta("two"), StreamEnd("end_turn", 1, 1)],
+    ])
+    agent = Agent(
+        client,
+        create_default_registry(),
+        "anthropic",
+        work_dir=".",
+        recall_fn=recall_fn,
+    )
+
+    first = ConversationManager()
+    first.add_user_message("first")
+    async for _ in agent.run(first):
+        pass
+
+    second = ConversationManager()
+    second.add_user_message("second")
+    async for _ in agent.run(second):
+        pass
+
+    assert queries == ["first", "second"]
+    assert agent.memory_recall_task is None
+
+
+def test_recall_query_ignores_system_reminders():
+    conv = ConversationManager()
+    conv.add_user_message("fix the parser")
+    conv.add_system_reminder("MCP server instructions")
+
+    assert Agent._latest_user_query(conv) == "fix the parser"
+
+
+def test_tui_ask_user_uses_schema_name_and_checkbox_type():
+    from myclaude.askuser_dialog import InlineAskUserWidget
+
+    question = {
+        "type": "checkbox",
+        "name": "features",
+        "message": "Choose features",
+        "options": ["Search", "Export"],
+    }
+
+    assert InlineAskUserWidget._answer_key(question, 0) == "features"
+    assert InlineAskUserWidget._is_multi(question) is True

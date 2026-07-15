@@ -9,6 +9,8 @@ import copy
 from dataclasses import dataclass, field
 from typing import Any
 
+from myclaude.provider_state import ProviderContinuationState
+
 
 @dataclass
 class ToolUseBlock:
@@ -37,6 +39,7 @@ class Message:
     tool_uses: list[ToolUseBlock] = field(default_factory=list)
     tool_results: list[ToolResultBlock] = field(default_factory=list)
     thinking_blocks: list[ThinkingBlock] = field(default_factory=list)
+    source: str = ""
 
 
 # 估算最后一次 API 用量锚点之后追加的消息 token 开销时使用的字符/token 比率。
@@ -69,6 +72,7 @@ def estimate_tokens(messages: list[Message]) -> int:
 @dataclass
 class ConversationManager:
     history: list[Message] = field(default_factory=list)
+    provider_state: ProviderContinuationState | None = None
     env_injected: bool = field(default=False, init=False)
     ltm_injected: bool = field(default=False, init=False)
     # API 报告的每轮真实 prompt 大小，保留用于向后兼容。
@@ -116,7 +120,7 @@ class ConversationManager:
         return self.baseline_tokens + estimate_tokens(tail)
 
     def add_user_message(self, content: str) -> None:
-        self.history.append(Message(role="user", content=content))
+        self.history.append(Message(role="user", content=content, source="user"))
 
     def add_assistant_message(
         self,
@@ -130,6 +134,7 @@ class ConversationManager:
                 content=content,
                 tool_uses=tool_uses or [],
                 thinking_blocks=thinking_blocks or [],
+                source="assistant",
             )
         )
 
@@ -138,17 +143,23 @@ class ConversationManager:
             Message(
                 role="user",
                 content=f"<system-reminder>\n{content}\n</system-reminder>",
+                source="system_reminder",
             )
         )
 
     def add_tool_results_message(self, tool_results: list[ToolResultBlock]) -> None:
         self.history.append(
-            Message(role="user", content="", tool_results=tool_results)
+            Message(
+                role="user",
+                content="",
+                tool_results=tool_results,
+                source="tool_result",
+            )
         )
 
 
     def inject_environment(self, context: str) -> None:
-        message = Message(role="user", content=context)
+        message = Message(role="user", content=context, source="environment")
         if self.env_injected:
             # Environment data is transient and may change after entering a
             # worktree or reloading catalogs.  Replace in place so transcript
@@ -192,7 +203,10 @@ class ConversationManager:
             "</system-reminder>"
         )
         pos = 1 if self.env_injected else 0
-        self.history.insert(pos, Message(role="user", content=wrapped))
+        self.history.insert(
+            pos,
+            Message(role="user", content=wrapped, source="system_reminder"),
+        )
         self.ltm_injected = True
 
     def replace_history(self, new_messages: list[Message]) -> None:
@@ -205,6 +219,9 @@ class ConversationManager:
         self.baseline_tokens = 0
         self.anchor_count = 0
         self.last_input_tokens = 0
+        # Compaction rewrites assistant turn indices, so provider-specific
+        # opaque state can no longer be aligned safely with the canonical log.
+        self.provider_state = None
 
 
     def get_messages(self) -> list[Message]:
@@ -212,7 +229,10 @@ class ConversationManager:
 
     def snapshot(self) -> "ConversationManager":
         """Return an isolated deep copy suitable for background LLM work."""
-        clone = ConversationManager(history=copy.deepcopy(self.history))
+        clone = ConversationManager(
+            history=copy.deepcopy(self.history),
+            provider_state=copy.deepcopy(self.provider_state),
+        )
         clone.env_injected = self.env_injected
         clone.ltm_injected = self.ltm_injected
         clone.last_input_tokens = self.last_input_tokens

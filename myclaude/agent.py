@@ -50,6 +50,7 @@ from myclaude.hooks.engine import HookNotification
 from myclaude.prompts import build_environment_context, build_plan_mode_reminder, build_system_prompt
 from myclaude.run_context import RunContext
 from myclaude.tools import ToolRegistry
+from myclaude.tools.ask_user import AskUserEvent, AskUserTool
 from myclaude.tools.base import (
     MAX_OUTPUT_CHARS,
     StreamEnd,
@@ -173,6 +174,7 @@ AgentEvent = (
     | UsageEvent
     | ErrorEvent
     | PermissionRequest
+    | AskUserEvent
     | CompactNotification
     | HookEvent
 )
@@ -393,6 +395,11 @@ class Agent:
             return None
         return self._run_context.remaining()
 
+    async def _await_run(self, awaitable: Awaitable[Any]) -> Any:
+        if self._run_context is None:
+            return await awaitable
+        return await self._run_context.wait_for(awaitable)
+
     def _limit_reason(
         self,
         iteration: int,
@@ -477,9 +484,16 @@ class Agent:
         if not wait and not task.done():
             return
         try:
-            recall = await task
+            recall = (
+                await self._await_run(task)
+                if wait
+                else await task
+            )
             if recall:
                 conversation.add_system_reminder(recall)
+        except TimeoutError:
+            task.cancel()
+            raise
         except asyncio.CancelledError:
             return
         except Exception as exc:
@@ -487,12 +501,18 @@ class Agent:
         finally:
             if task is self.memory_recall_task:
                 self._memory_recall_consumed = True
+                self.memory_recall_task = None
 
     @staticmethod
     def _latest_user_query(conversation: ConversationManager) -> str:
         """取最近一条真实用户消息作为召回 query（跳过工具结果消息）。"""
         for msg in reversed(conversation.history):
-            if msg.role == "user" and msg.content and not msg.tool_results:
+            if (
+                msg.role == "user"
+                and msg.source in ("", "user")
+                and msg.content
+                and not msg.tool_results
+            ):
                 return msg.content
         return ""
 
@@ -511,7 +531,7 @@ class Agent:
         query = self._latest_user_query(conversation)
         if not query:
             return
-        task = asyncio.ensure_future(self.recall_fn(query))
+        task = asyncio.create_task(self.recall_fn(query))
         self.memory_recall_task = task
         self._memory_recall_consumed = False
         if self._run_context is not None:
@@ -619,10 +639,23 @@ class Agent:
     async def run(self, conversation: ConversationManager) -> AsyncIterator[AgentEvent]:
         self._current_conversation = conversation
         env_context = self.prepare_conversation(conversation)
+        # The deadline starts before lifecycle hooks so every external await in
+        # this run shares the same wall-clock budget.
+        self._run_context = RunContext.from_wall_time(
+            self.run_limits.max_wall_time_seconds,
+        )
 
         if self.hook_engine:
             ctx = self._build_hook_context("session_start")
-            await self.hook_engine.run_hooks("session_start", ctx)
+            try:
+                await self._await_run(
+                    self.hook_engine.run_hooks("session_start", ctx)
+                )
+            except TimeoutError:
+                yield ErrorEvent(
+                    message="Agent run limit exceeded: maximum wall time reached"
+                )
+                return
             for he in self._drain_hook_events():
                 yield he
 
@@ -630,13 +663,6 @@ class Agent:
         consecutive_unknown = 0
         max_tokens_escalated = False
         output_recoveries = 0
-        # RunContext 统一承载本次运行的 deadline / 取消 / 背压信号量，贯穿
-        # LLM stream、工具执行、retry sleep。子 Agent / fork 各自调用 run()，
-        # 因此天然拥有独立的 RunContext。
-        self._run_context = RunContext.from_wall_time(
-            self.run_limits.max_wall_time_seconds,
-        )
-
         # 动态召回移入共享 Runtime：只要注入了 recall_fn 且本轮尚未有召回任务
         # （TUI 会自行 prefetch 并预置 memory_recall_task），就在这里启动召回。
         # 这样 Headless / Remote 也能获得与 TUI 一致的召回语义，而不再是 UI 专属。
@@ -654,7 +680,15 @@ class Agent:
 
             if self.hook_engine:
                 ctx = self._build_hook_context("turn_start")
-                await self.hook_engine.run_hooks("turn_start", ctx)
+                try:
+                    await self._await_run(
+                        self.hook_engine.run_hooks("turn_start", ctx)
+                    )
+                except TimeoutError:
+                    yield ErrorEvent(
+                        message="Agent run limit exceeded: maximum wall time reached"
+                    )
+                    break
                 for he in self._drain_hook_events():
                     yield he
 
@@ -667,7 +701,15 @@ class Agent:
 
             if self.hook_engine:
                 ctx = self._build_hook_context("pre_send")
-                await self.hook_engine.run_hooks("pre_send", ctx)
+                try:
+                    await self._await_run(
+                        self.hook_engine.run_hooks("pre_send", ctx)
+                    )
+                except TimeoutError:
+                    yield ErrorEvent(
+                        message="Agent run limit exceeded: maximum wall time reached"
+                    )
+                    break
                 for he in self._drain_hook_events():
                     yield he
 
@@ -716,17 +758,25 @@ class Agent:
 
             # Layer 2: 接近 context window 上限时自动 compact
             # tool-result budget 已就地修改 conversation，直接用 conversation.history 估算
-            compact_result = await auto_compact(
-                conversation,
-                self.client,
-                self.context_window,
-                self.session_dir,
-                protocol=self.protocol,
-                breaker=self.compact_breaker,
-                recovery=self.recovery_state,
-                tool_schemas=self.registry.get_all_schemas(self.protocol),
-                transcript_path=self._transcript_path,
-            )
+            try:
+                compact_result = await self._await_run(
+                    auto_compact(
+                        conversation,
+                        self.client,
+                        self.context_window,
+                        self.session_dir,
+                        protocol=self.protocol,
+                        breaker=self.compact_breaker,
+                        recovery=self.recovery_state,
+                        tool_schemas=self.registry.get_all_schemas(self.protocol),
+                        transcript_path=self._transcript_path,
+                    )
+                )
+            except TimeoutError:
+                yield ErrorEvent(
+                    message="Agent run limit exceeded: maximum wall time reached"
+                )
+                break
             if isinstance(compact_result, CompactEvent):
                 conversation.inject_environment(env_context)
                 mem = self.memory_manager.load() if self.memory_manager else ""
@@ -766,18 +816,32 @@ class Agent:
                         fatal_request_error = True
                         break
                     overflow_recovered = True
-                    recovery_result = await auto_compact(
-                        conversation,
-                        self.client,
-                        self.context_window,
-                        self.session_dir,
-                        protocol=self.protocol,
-                        manual=True,
-                        breaker=self.compact_breaker,
-                        recovery=self.recovery_state,
-                        tool_schemas=self.registry.get_all_schemas(self.protocol),
-                        transcript_path=self._transcript_path,
-                    )
+                    try:
+                        recovery_result = await self._await_run(
+                            auto_compact(
+                                conversation,
+                                self.client,
+                                self.context_window,
+                                self.session_dir,
+                                protocol=self.protocol,
+                                manual=True,
+                                breaker=self.compact_breaker,
+                                recovery=self.recovery_state,
+                                tool_schemas=self.registry.get_all_schemas(
+                                    self.protocol
+                                ),
+                                transcript_path=self._transcript_path,
+                            )
+                        )
+                    except TimeoutError:
+                        yield ErrorEvent(
+                            message=(
+                                "Agent run limit exceeded: "
+                                "maximum wall time reached"
+                            )
+                        )
+                        fatal_request_error = True
+                        break
                     if not isinstance(recovery_result, CompactEvent):
                         detail = recovery_result if isinstance(recovery_result, str) else str(exc)
                         yield ErrorEvent(message=f"Reactive compaction failed: {detail}")
@@ -827,7 +891,15 @@ class Agent:
 
             if self.hook_engine:
                 ctx = self._build_hook_context("post_receive", message=response.text)
-                await self.hook_engine.run_hooks("post_receive", ctx)
+                try:
+                    await self._await_run(
+                        self.hook_engine.run_hooks("post_receive", ctx)
+                    )
+                except TimeoutError:
+                    yield ErrorEvent(
+                        message="Agent run limit exceeded: maximum wall time reached"
+                    )
+                    break
                 for he in self._drain_hook_events():
                     yield he
 
@@ -943,16 +1015,47 @@ class Agent:
                         )
                     )
                 if self.memory_recall_task and not self._memory_recall_consumed:
-                    self._spawn_background(
-                        self._consume_memory_recall(conversation, wait=True)
-                    )
+                    try:
+                        await self._consume_memory_recall(
+                            conversation, wait=True
+                        )
+                    except TimeoutError:
+                        yield ErrorEvent(
+                            message=(
+                                "Agent run limit exceeded: "
+                                "maximum wall time reached"
+                            )
+                        )
+                        break
                 queued_count = self._inject_queued_user_messages(conversation)
                 if self.hook_engine:
                     ctx = self._build_hook_context("turn_end")
-                    await self.hook_engine.run_hooks("turn_end", ctx)
+                    try:
+                        await self._await_run(
+                            self.hook_engine.run_hooks("turn_end", ctx)
+                        )
+                    except TimeoutError:
+                        yield ErrorEvent(
+                            message=(
+                                "Agent run limit exceeded: "
+                                "maximum wall time reached"
+                            )
+                        )
+                        break
                     if not queued_count:
                         ctx = self._build_hook_context("session_end")
-                        await self.hook_engine.run_hooks("session_end", ctx)
+                        try:
+                            await self._await_run(
+                                self.hook_engine.run_hooks("session_end", ctx)
+                            )
+                        except TimeoutError:
+                            yield ErrorEvent(
+                                message=(
+                                    "Agent run limit exceeded: "
+                                    "maximum wall time reached"
+                                )
+                            )
+                            break
                     for he in self._drain_hook_events():
                         yield he
                 if self.file_history is not None:
@@ -1028,7 +1131,7 @@ class Agent:
                     elapsed = 0.0
                     is_unknown = False
                     async for item in self._execute_tool(tc):
-                        if isinstance(item, PermissionRequest):
+                        if isinstance(item, (PermissionRequest, AskUserEvent)):
                             yield item
                         else:
                             result, elapsed, is_unknown = item
@@ -1092,7 +1195,15 @@ class Agent:
 
             if self.hook_engine:
                 ctx = self._build_hook_context("turn_end")
-                await self.hook_engine.run_hooks("turn_end", ctx)
+                try:
+                    await self._await_run(
+                        self.hook_engine.run_hooks("turn_end", ctx)
+                    )
+                except TimeoutError:
+                    yield ErrorEvent(
+                        message="Agent run limit exceeded: maximum wall time reached"
+                    )
+                    break
                 for he in self._drain_hook_events():
                     yield he
             yield TurnComplete(turn=iteration)
@@ -1136,6 +1247,9 @@ class Agent:
                 # If a rule changed between classification and execution, fail closed.
                 if not item.future.done():
                     item.future.set_result(PermissionResponse.DENY)
+            elif isinstance(item, AskUserEvent):
+                if not item.future.done():
+                    item.future.set_result({})
             else:
                 result, elapsed, is_unknown = item
         if result is None:
@@ -1165,7 +1279,9 @@ class Agent:
 
     async def _execute_tool(
         self, tc: ToolCallComplete
-    ) -> AsyncIterator[PermissionRequest | tuple[ToolResult, float, bool]]:
+    ) -> AsyncIterator[
+        PermissionRequest | AskUserEvent | tuple[ToolResult, float, bool]
+    ]:
         tool = self.registry.get(tc.tool_name)
         start = time.monotonic()
         is_unknown = False
@@ -1214,7 +1330,17 @@ class Agent:
                 tool_args=tc.arguments,
                 file_path=file_path,
             )
-            rejection = await self.hook_engine.run_pre_tool_hooks(hook_ctx)
+            try:
+                rejection = await self._await_run(
+                    self.hook_engine.run_pre_tool_hooks(hook_ctx)
+                )
+            except TimeoutError:
+                result = ToolResult(
+                    output="Pre-tool hook exceeded run deadline",
+                    is_error=True,
+                )
+                yield result, time.monotonic() - start, is_unknown
+                return
             if rejection is not None:
                 result = ToolResult(
                     output=f"Hook rejected: {rejection.reason}", is_error=True
@@ -1245,7 +1371,17 @@ class Agent:
                     description=desc,
                     future=future,
                 )
-                response = await future
+                try:
+                    response = await self._await_run(future)
+                except TimeoutError:
+                    if not future.done():
+                        future.cancel()
+                    result = ToolResult(
+                        output="Permission request exceeded run deadline",
+                        is_error=True,
+                    )
+                    yield result, time.monotonic() - start, is_unknown
+                    return
 
                 if response == PermissionResponse.DENY:
                     result = ToolResult(
@@ -1263,13 +1399,25 @@ class Agent:
                     # 其他不相关的命令（S-5）
                     pattern = content
                     # 持久化规则写入本地文件
-                    rule = Rule(tool_name=tc.tool_name, pattern=pattern, effect="allow")
+                    rule = Rule(
+                        tool_name=tc.tool_name,
+                        pattern=pattern,
+                        effect="allow",
+                        match="literal",
+                    )
                     self.permission_checker.rule_engine.append_local_rule(rule)
                     # 同时加入会话级放行集合，本轮立即生效无需磁盘读取
                     self.permission_checker.add_session_allow(tc.tool_name, content)
 
         try:
             execution = asyncio.create_task(tool.execute(params))
+            if isinstance(tool, AskUserTool):
+                # Let the tool publish its pending event before the Agent waits
+                # for the answer. The event is a first-class delivery-surface
+                # event, avoiding UI polling and the previous deadlock.
+                await asyncio.sleep(0)
+                if tool._pending_event is not None:
+                    yield tool._pending_event
             # 工具执行也必须受总 deadline 约束——一个没有自身超时的 Bash 命令或
             # MCP 调用（MCP 工具正是经由此路径执行）不能无限拖过运行时限。
             remaining = (
@@ -1340,7 +1488,19 @@ class Agent:
                 message=result.output if not result.is_error else "",
                 error=result.output if result.is_error else "",
             )
-            await self.hook_engine.run_hooks("post_tool_use", hook_ctx)
+            try:
+                await self._await_run(
+                    self.hook_engine.run_hooks("post_tool_use", hook_ctx)
+                )
+            except TimeoutError:
+                if not result.is_error:
+                    result = ToolResult(
+                        output=(
+                            result.output
+                            + "\nPost-tool hook exceeded run deadline"
+                        ).strip(),
+                        is_error=True,
+                    )
 
         elapsed = time.monotonic() - start
         yield result, elapsed, is_unknown

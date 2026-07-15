@@ -62,9 +62,11 @@ from myclaude.mcp import MCPManager
 from myclaude.memory import MemoryManager
 from myclaude.memory.session import Session, SessionManager, make_compact_boundary
 from myclaude.permissions import PermissionMode
+from myclaude.prompts import build_plan_mode_exit_reminder
 from myclaude.runtime_assembler import RuntimeAssembler
 from myclaude.skills.loader import SkillLoader
 from myclaude.tools import ToolRegistry
+from myclaude.tools.ask_user import AskUserEvent
 from myclaude.web_content import INDEX_HTML
 
 log = logging.getLogger(__name__)
@@ -122,10 +124,13 @@ class RemoteServer:
 
         # 权限请求的 pending 队列：id -> Future
         self._pending_perms: dict[str, asyncio.Future[PermissionResponse]] = {}
+        self._pending_asks: dict[str, asyncio.Future[dict[str, str]]] = {}
+        self._pre_plan_mode = permission_mode
 
         # 命令注册表
         self.command_registry = CommandRegistry()
         register_all_commands(self.command_registry)
+        self._command_state: dict[str, Any] = {}
         for error in register_user_commands(
             self.command_registry,
             os.getcwd(),
@@ -251,12 +256,19 @@ class RemoteServer:
                 elif msg_type == "permission_response":
                     self._handle_permission_response(data)
 
+                elif msg_type == "ask_user_response":
+                    self._handle_ask_user_response(data)
+
+                elif msg_type == "plan_response":
+                    self._handle_plan_response(data)
+
                 elif msg_type == "cancel":
                     if self._cancel_event is not None:
                         self._cancel_event.set()
                     if self._agent_task is not None and not self._agent_task.done():
                         self._agent_task.cancel()
                     self._deny_pending_permissions()
+                    self._cancel_pending_asks()
 
                 elif msg_type == "ping":
                     # 应用层保活
@@ -269,6 +281,7 @@ class RemoteServer:
             if self._agent_task is not None and not self._agent_task.done():
                 self._agent_task.cancel()
             self._deny_pending_permissions()
+            self._cancel_pending_asks()
 
     # ------------------------------------------------------------------
     # Agent 初始化（复刻 TUI 的 _select_provider 流程）
@@ -296,7 +309,7 @@ class RemoteServer:
         runtime = self._assembler.build_core()
         features = self._assembler.install_standard_features(
             runtime,
-            interactive=False,
+            interactive=True,
             teammate_mode=self.teammate_mode or "in-process",
             enable_fork=self.enable_fork,
             enable_verification_agent=self.enable_verification_agent,
@@ -466,11 +479,25 @@ class RemoteServer:
                         },
                     })
 
+                elif isinstance(event, AskUserEvent):
+                    ask_id = f"ask_{time.time_ns()}"
+                    self._pending_asks[ask_id] = event.future
+                    await self._broadcast({
+                        "type": "ask_user",
+                        "data": {
+                            "id": ask_id,
+                            "questions": event.questions,
+                        },
+                    })
+
                 elif isinstance(event, TurnComplete):
                     if self.session is not None:
                         for message in self.conversation.history[history_cursor:]:
                             self.session.append(message)
                         history_cursor = len(self.conversation.history)
+                        self.session.update_provider_state(
+                            self.conversation.provider_state
+                        )
                     if stream_buf:
                         await self._broadcast({
                             "type": "stream_end",
@@ -491,6 +518,9 @@ class RemoteServer:
                             self.agent.total_input_tokens
                             + self.agent.total_output_tokens
                         )
+                        self.session.update_provider_state(
+                            self.conversation.provider_state
+                        )
                         self.session.meta.save(
                             self.session._sessions_dir
                             / f"{self.session.session_id}.meta"
@@ -509,6 +539,19 @@ class RemoteServer:
                             "elapsed": elapsed,
                         },
                     })
+                    if self.agent.plan_mode:
+                        plan_path = self.agent._get_plan_path()
+                        try:
+                            plan_content = plan_path.read_text(encoding="utf-8")
+                        except OSError:
+                            plan_content = ""
+                        await self._broadcast({
+                            "type": "plan_approval",
+                            "data": {
+                                "path": str(plan_path),
+                                "plan": plan_content,
+                            },
+                        })
 
                 elif isinstance(event, UsageEvent):
                     await self._broadcast({
@@ -532,6 +575,9 @@ class RemoteServer:
                                 event.boundary.summary,
                                 event.boundary.keep,
                             )
+                        )
+                        self.session.update_provider_state(
+                            self.conversation.provider_state
                         )
                         history_cursor = len(self.conversation.history)
                     await self._broadcast({
@@ -574,6 +620,11 @@ class RemoteServer:
             self._pending_perms = {
                 key: future
                 for key, future in self._pending_perms.items()
+                if not future.done()
+            }
+            self._pending_asks = {
+                key: future
+                for key, future in self._pending_asks.items()
                 if not future.done()
             }
             self._agent_task = None
@@ -652,6 +703,15 @@ class RemoteServer:
 
     def _build_command_context(self, args: str) -> CommandContext:
         """构建命令上下文。"""
+        self._command_state.update(
+            {
+                "registry": self.command_registry,
+                "set_session": self._set_session,
+                "set_conversation": self._set_conversation,
+                "clear_chat": self._clear_chat,
+                "render_restored": self._render_restored_messages,
+            }
+        )
         return CommandContext(
             args=args,
             agent=self.agent,
@@ -660,10 +720,35 @@ class RemoteServer:
             session_manager=self.session_manager,
             memory_manager=self.memory_manager,
             ui=self,  # type: ignore[arg-type]
-            config={
-                "registry": self.command_registry,
-            },
+            config=self._command_state,
         )
+
+    def _set_session(self, session: Session) -> None:
+        self.session = session
+        self.session_id = session.session_id
+        if self.agent is not None:
+            self.agent.session_id = session.session_id
+
+    def _set_conversation(self, conversation: ConversationManager) -> None:
+        self.conversation = conversation
+
+    def _clear_chat(self) -> None:
+        asyncio.create_task(self._broadcast({"type": "clear", "data": None}))
+
+    async def _render_restored_messages(self, messages: list[Any]) -> None:
+        await self._broadcast({"type": "clear", "data": None})
+        for message in messages:
+            if message.tool_results or not message.content:
+                continue
+            if message.source != "user" and message.role == "user":
+                continue
+            event_type = (
+                "replay_user" if message.role == "user" else "replay_assistant"
+            )
+            await self._broadcast({
+                "type": event_type,
+                "data": {"content": message.content},
+            })
 
     async def _handle_compact(self) -> None:
         """处理 /compact 命令。"""
@@ -688,6 +773,9 @@ class RemoteServer:
                         result.boundary.summary,
                         result.boundary.keep,
                     )
+                )
+                self.session.update_provider_state(
+                    self.conversation.provider_state
                 )
             await self._broadcast({
                 "type": "system",
@@ -723,9 +811,10 @@ class RemoteServer:
         if self.agent is None:
             return
         if enabled:
+            self._pre_plan_mode = self.agent.permission_mode
             self.agent.set_permission_mode(PermissionMode.PLAN)
         else:
-            self.agent.set_permission_mode(self.permission_mode)
+            self.agent.set_permission_mode(self._pre_plan_mode)
 
     def get_token_count(self) -> tuple[int, int]:
         if self.agent:
@@ -757,6 +846,60 @@ class RemoteServer:
         response = mapping.get(response_str, PermissionResponse.DENY)
         future.set_result(response)
 
+    def _handle_ask_user_response(self, data: dict[str, Any]) -> None:
+        ask_id = data.get("id", "")
+        answers = data.get("answers", {})
+        future = self._pending_asks.pop(ask_id, None)
+        if future is None or future.done():
+            return
+        future.set_result(
+            {
+                str(key): str(value)
+                for key, value in answers.items()
+            }
+            if isinstance(answers, dict)
+            else {}
+        )
+
+    def _handle_plan_response(self, data: dict[str, Any]) -> None:
+        if self.agent is None:
+            return
+        choice = str(data.get("choice", "manual"))
+        feedback = str(data.get("feedback", "")).strip()
+        if choice == "feedback":
+            if feedback:
+                self._start_after_current(feedback)
+            return
+
+        mode = (
+            PermissionMode.BYPASS
+            if choice == "bypass"
+            else self._pre_plan_mode
+        )
+        self.agent.set_permission_mode(mode)
+        plan_path = self.agent._get_plan_path()
+        plan_exists = plan_path.exists()
+        try:
+            plan_content = plan_path.read_text(encoding="utf-8")
+        except OSError:
+            plan_content = ""
+        execute_text = (
+            build_plan_mode_exit_reminder(str(plan_path), plan_exists)
+            + "\n\nUser has approved your plan. You can now start coding."
+        )
+        if plan_content:
+            execute_text += "\n\nApproved Plan:\n" + plan_content
+        self._start_after_current(execute_text)
+
+    def _start_after_current(self, content: str) -> None:
+        async def restart() -> None:
+            current = self._agent_task
+            if current is not None and not current.done():
+                await asyncio.gather(current, return_exceptions=True)
+            self._start_agent_task(content)
+
+        asyncio.create_task(restart())
+
     def _start_agent_task(self, content: str) -> None:
         if self._agent_task is None or self._agent_task.done():
             self._agent_task = asyncio.create_task(
@@ -769,11 +912,18 @@ class RemoteServer:
                 future.set_result(PermissionResponse.DENY)
         self._pending_perms.clear()
 
+    def _cancel_pending_asks(self) -> None:
+        for future in self._pending_asks.values():
+            if not future.done():
+                future.set_result({})
+        self._pending_asks.clear()
+
     async def _shutdown(self) -> None:
         if self._agent_task is not None and not self._agent_task.done():
             self._agent_task.cancel()
             await asyncio.gather(self._agent_task, return_exceptions=True)
         self._deny_pending_permissions()
+        self._cancel_pending_asks()
 
         tasks: list[asyncio.Task[Any]] = []
         if self.agent is not None and self.agent.memory_manager is not None:

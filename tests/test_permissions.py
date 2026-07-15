@@ -13,6 +13,7 @@ from typing import Any, AsyncIterator
 
 import pytest
 import yaml
+from pydantic import BaseModel
 
 from myclaude.agent import (
     Agent,
@@ -42,7 +43,14 @@ from myclaude.permissions import (
 )
 from myclaude.permissions.dangerous import is_safe_command
 from myclaude.tools import create_default_registry
-from myclaude.tools.base import StreamEnd, StreamEvent, TextDelta, ToolCallComplete
+from myclaude.tools.base import (
+    StreamEnd,
+    StreamEvent,
+    TextDelta,
+    Tool,
+    ToolCallComplete,
+    ToolResult,
+)
 
 # ===========================================================================
 # 第一层：DangerousCommandDetector（危险命令检测器）
@@ -304,6 +312,47 @@ class TestRuleEngine:
         engine.append_local_rule(Rule(tool_name="Bash", pattern="git commit *", effect="allow"))
         assert local_path.exists()
         assert engine.evaluate("Bash", "git commit -m test") == "allow"
+
+    def test_literal_rule_does_not_interpret_glob_metacharacters(self) -> None:
+        tmpdir = Path(tempfile.mkdtemp())
+        local_path = tmpdir / "permissions.local.yaml"
+        engine = RuleEngine(local_rules_path=local_path)
+        engine.append_local_rule(
+            Rule(
+                tool_name="Bash",
+                pattern="python scripts/[ab].py",
+                effect="allow",
+                match="literal",
+            )
+        )
+
+        assert (
+            engine.evaluate("Bash", "python scripts/[ab].py") == "allow"
+        )
+        assert engine.evaluate("Bash", "python scripts/a.py") is None
+        assert yaml.safe_load(local_path.read_text())[0]["match"] == "literal"
+
+    def test_generic_permission_scope_uses_full_canonical_arguments(self) -> None:
+        class Params(BaseModel):
+            payload: str
+
+        class DemoTool(Tool):
+            name = "Demo"
+            description = "demo"
+            params_model = Params
+
+            async def execute(self, params: BaseModel) -> ToolResult:
+                return ToolResult(output="ok")
+
+        tool = DemoTool()
+        first = tool.permission_scope(
+            {"payload": "x" * 130 + "AAA"}
+        )
+        second = tool.permission_scope(
+            {"payload": "x" * 130 + "BBB"}
+        )
+        assert first.content != second.content
+        assert first.description.endswith("...")
 
 # ===========================================================================
 # 第四层：PermissionMode（权限模式）

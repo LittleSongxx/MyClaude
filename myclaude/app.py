@@ -28,6 +28,7 @@ from myclaude.agent import (
     HookEvent,
     LoopComplete,
     PermissionRequest,
+    PermissionResponse,
     RetryEvent,
     StreamText,
     ThinkingText,
@@ -78,8 +79,7 @@ from rich.text import Text as RichText
 from textual.theme import Theme
 from myclaude.cache import FileCache
 from myclaude.tools import ToolRegistry, create_default_registry
-from myclaude.tools.ask_user import AskUserEvent, AskUserTool
-from myclaude.tools.install_skill import InstallSkillTool
+from myclaude.tools.ask_user import AskUserEvent
 from myclaude.tools.load_skill import LoadSkill
 
 if TYPE_CHECKING:
@@ -740,16 +740,6 @@ class MyClaudeApp(App):
             if hasattr(tool, "file_history"):
                 tool.file_history = self.file_history
 
-        install_skill_tool = InstallSkillTool()
-        self.registry.register(install_skill_tool)
-        self._install_skill_tool = install_skill_tool
-
-        self.registry.register(AskUserTool())
-
-        from myclaude.tools.exit_plan_mode import ExitPlanModeTool
-        self._exit_plan_tool = ExitPlanModeTool()
-        self.registry.register(self._exit_plan_tool)
-
         self._assembler = RuntimeAssembler(
             provider,
             self._initial_permission_mode,
@@ -787,9 +777,9 @@ class MyClaudeApp(App):
         self.task_manager = features.task_manager
         self.trace_manager = features.trace_manager
         self.team_manager = features.team_manager
-
-        self._exit_plan_tool._is_plan_mode = lambda: self.agent.plan_mode
-        self._exit_plan_tool._plan_exists = lambda: self.agent._get_plan_path().exists()
+        install_skill_tool = features.install_skill_tool
+        self._install_skill_tool = install_skill_tool
+        self._exit_plan_tool = features.exit_plan_tool
 
         # Layer 2: 在后台异步拉取模型的 context window，不阻塞启动流程。
         # agent 已经有一个同步解析的窗口值（来自配置 / 映射表 / 默认值）；
@@ -1330,21 +1320,23 @@ class MyClaudeApp(App):
                 elif isinstance(event, PermissionRequest):
                     await self._handle_permission_request(event)
 
+                elif isinstance(event, AskUserEvent):
+                    await self._handle_askuser(event)
+
                 elif isinstance(event, ToolResultEvent):
                     block = tool_blocks.get(event.tool_id)
                     if block:
                         block.set_result(event.output, event.is_error, event.elapsed)
                     self.call_after_refresh(chat.scroll_end, animate=False)
 
-                    ask_tool = self.registry.get("AskUserQuestion")
-                    if ask_tool and isinstance(ask_tool, AskUserTool) and ask_tool._pending_event:
-                        await self._handle_askuser(ask_tool._pending_event)
-
                 elif isinstance(event, TurnComplete):
                     if self.session:
                         for msg in self.conversation.history[history_cursor:]:
                             self.session.append(msg)
                         history_cursor = len(self.conversation.history)
+                        self.session.update_provider_state(
+                            self.conversation.provider_state
+                        )
 
                     collapsible = [
                         (tid, blk) for tid, blk in tool_blocks.items()
@@ -1387,6 +1379,10 @@ class MyClaudeApp(App):
                     # 刷盘时只追加 boundary 之后的新消息，不会把已压缩的
                     # 前缀作为普通记录重复写入。
                     self._persist_compact_boundary(event)
+                    if self.session:
+                        self.session.update_provider_state(
+                            self.conversation.provider_state
+                        )
                     history_cursor = len(self.conversation.history)
 
                 elif isinstance(event, ErrorEvent):
@@ -1413,6 +1409,9 @@ class MyClaudeApp(App):
                         self.session.meta.total_tokens = (
                             self.agent.total_input_tokens
                             + self.agent.total_output_tokens
+                        )
+                        self.session.update_provider_state(
+                            self.conversation.provider_state
                         )
                         self._schedule_session_summary()
                     if self.agent.plan_mode:
@@ -1608,6 +1607,32 @@ class MyClaudeApp(App):
         self._stop_spinner()
         self._stop_teammate_polling()
         self._agent_task = None
+        permission = getattr(self, "_pending_perm_request", None)
+        if permission is not None:
+            if not permission.future.done():
+                permission.future.set_result(PermissionResponse.DENY)
+            self._pending_perm_request = None
+            try:
+                from myclaude.permission_dialog import InlinePermissionWidget
+
+                self.query_one("#perm-inline", InlinePermissionWidget).remove()
+            except Exception:
+                pass
+        ask = getattr(self, "_pending_askuser_event", None)
+        if ask is not None:
+            if not ask.future.done():
+                ask.future.set_result({})
+            self._pending_askuser_event = None
+            try:
+                from myclaude.askuser_dialog import InlineAskUserWidget
+
+                self.query_one("#askuser-inline", InlineAskUserWidget).remove()
+            except Exception:
+                pass
+        try:
+            self.query_one("#chat-input").disabled = False
+        except Exception:
+            pass
         if self._teammate_tree is not None:
             self._teammate_tree.remove()
             self._teammate_tree = None
@@ -1701,7 +1726,8 @@ class MyClaudeApp(App):
 
         req = getattr(self, "_pending_perm_request", None)
         if req is not None:
-            req.future.set_result(event.response)
+            if not req.future.done():
+                req.future.set_result(event.response)
             self._pending_perm_request = None
         # 从聊天区移除权限弹窗组件
         try:
@@ -1728,6 +1754,8 @@ class MyClaudeApp(App):
             if msg.tool_results or not msg.content:
                 continue
             if msg.role == "user":
+                if msg.source != "user":
+                    continue
                 row = Vertical(classes="user-row")
                 await chat.mount(row)
                 user_rich = RichText()

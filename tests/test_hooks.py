@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
 import sys
 from unittest.mock import patch
 
@@ -97,6 +98,23 @@ class TestHookContext:
         ctx = HookContext()
         assert ctx.expand("hello $UNKNOWN world") == "hello $UNKNOWN world"
         assert ctx.expand("$FILE_PATH") == ""
+
+    def test_shell_safe_expand_never_reprocesses_inserted_placeholders(self):
+        ctx = HookContext(
+            file_path="$TOOL_ARGS.command",
+            tool_args={"command": "; printf INJECTED"},
+        )
+        command = ctx.shell_safe_expand(
+            'printf "PATH=<%s>\\n" $FILE_PATH'
+        )
+        proc = subprocess.run(
+            ["/bin/sh", "-c", command],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert proc.stdout == "PATH=<$TOOL_ARGS.command>\n"
+        assert "INJECTED" not in proc.stdout
 
 # ---------------------------------------------------------------------------
 # 条件解析

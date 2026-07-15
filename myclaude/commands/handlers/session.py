@@ -76,7 +76,7 @@ async def handle_session(ctx: CommandContext) -> None:
         if ctx.session:
             ctx.session.close()
         ctx.config["set_session"](result.session)
-        conv = ConversationManager()
+        conv = ConversationManager(provider_state=result.provider_state)
         for msg in result.messages:
             conv.history.append(msg)
         ctx.config["set_conversation"](conv)

@@ -4,6 +4,7 @@
 # 简历模版：jianli.xiaolinnote.com
 from __future__ import annotations
 
+import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,6 +26,7 @@ class PermissionScope:
 
     content: str = ""
     path: str = ""
+    description: str = ""
 
 
 @dataclass
@@ -65,13 +67,23 @@ class Tool(ABC):
         return path
 
     def permission_scope(self, arguments: dict[str, Any]) -> PermissionScope:
+        content = json.dumps(
+            arguments,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
         parts: list[str] = []
         for key, value in arguments.items():
             rendered = str(value)
             if len(rendered) > 120:
                 rendered = rendered[:117] + "..."
             parts.append(f"{key}={rendered}")
-        return PermissionScope(content=", ".join(parts))
+        return PermissionScope(
+            content=content,
+            description=", ".join(parts),
+        )
 
     @abstractmethod
     async def execute(self, params: BaseModel) -> ToolResult: ...

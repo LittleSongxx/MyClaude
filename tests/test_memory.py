@@ -37,6 +37,7 @@ from myclaude.memory.session import (
     records_to_messages,
     validate_message_chain,
 )
+from myclaude.provider_state import ProviderContinuationState
 
 # =========================================================================
 # A. 指令文件（MYCLAUDE.md）
@@ -158,6 +159,22 @@ class TestSessionRecord:
         assert restored is not None
         assert restored.type == RecordType.USER
         assert restored.content == "hello world"
+
+    def test_message_source_roundtrip(self) -> None:
+        msg = Message(
+            role="user",
+            content="<system-reminder>internal</system-reminder>",
+            source="system_reminder",
+        )
+
+        restored = SessionRecord.from_jsonl(
+            SessionRecord.from_message(msg)[0].to_jsonl()
+        )
+
+        assert restored is not None
+        assert restored.source == "system_reminder"
+        messages = records_to_messages([restored])
+        assert messages[0].source == "system_reminder"
 
     def test_assistant_with_tool_uses(self) -> None:
         msg = Message(
@@ -414,6 +431,36 @@ class TestSessionResume:
         result = mgr.resume(sid)
         assert result is not None
         assert len(result.messages) == 2
+        result.session.close()
+
+    def test_resume_restores_provider_continuation_state(
+        self, tmp_path: Path
+    ) -> None:
+        mgr = SessionManager(str(tmp_path))
+        session = mgr.create()
+        session_id = session.session_id
+        state = ProviderContinuationState(provider="openai")
+        state.record_turn(
+            0,
+            response_id="resp-1",
+            opaque_items=[{
+                "type": "reasoning",
+                "id": "rs-1",
+                "encrypted_content": "opaque-token",
+            }],
+        )
+        session.append(Message(role="user", content="hello", source="user"))
+        session.update_provider_state(state)
+        session.close()
+
+        result = mgr.resume(session_id)
+
+        assert result is not None
+        assert result.provider_state is not None
+        restored = result.provider_state.get_turn(0)
+        assert restored is not None
+        assert restored.response_id == "resp-1"
+        assert restored.opaque_items[0]["encrypted_content"] == "opaque-token"
         result.session.close()
 
 # =========================================================================

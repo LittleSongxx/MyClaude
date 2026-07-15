@@ -4,10 +4,12 @@
 # 简历模版：jianli.xiaolinnote.com
 from __future__ import annotations
 
+import copy
 import json
 from typing import Any
 
 from myclaude.conversation import Message
+from myclaude.provider_state import ProviderContinuationState
 
 # 把 provider 无关的内部消息序列化成各家 API 的请求格式。
 # 这一层属于「适配器」职责，对话层（ConversationManager）只管消息、不懂线上格式。
@@ -61,17 +63,30 @@ def build_anthropic_messages(messages: list[Message]) -> list[dict[str, Any]]:
     return result
 
 
-def build_openai_input(messages: list[Message]) -> list[dict[str, Any]]:
+def build_openai_input(
+    messages: list[Message],
+    provider_state: ProviderContinuationState | None = None,
+) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
+    assistant_turn = 0
     for m in messages:
+        turn_state = (
+            provider_state.get_turn(assistant_turn)
+            if m.role == "assistant"
+            and provider_state is not None
+            and provider_state.provider == "openai"
+            else None
+        )
         if m.tool_uses:
-            # Responses API: thinking blocks 作为 reasoning item 回传。
-            for tb in (m.thinking_blocks or []):
-                result.append({
-                    "type": "reasoning",
-                    "id": tb.signature,
-                    "summary": [{"type": "summary_text", "text": tb.thinking}],
-                })
+            if turn_state is not None and turn_state.opaque_items:
+                result.extend(copy.deepcopy(turn_state.opaque_items))
+            else:
+                for tb in (m.thinking_blocks or []):
+                    result.append({
+                        "type": "reasoning",
+                        "id": tb.signature,
+                        "summary": [{"type": "summary_text", "text": tb.thinking}],
+                    })
             if m.content:
                 result.append({"role": "assistant", "content": m.content})
             for tu in m.tool_uses:
@@ -89,14 +104,18 @@ def build_openai_input(messages: list[Message]) -> list[dict[str, Any]]:
                     "output": tr.content,
                 })
         else:
-            # 非 tool 的 assistant 消息也回传 reasoning。
-            for tb in (m.thinking_blocks or []):
-                result.append({
-                    "type": "reasoning",
-                    "id": tb.signature,
-                    "summary": [{"type": "summary_text", "text": tb.thinking}],
-                })
+            if turn_state is not None and turn_state.opaque_items:
+                result.extend(copy.deepcopy(turn_state.opaque_items))
+            else:
+                for tb in (m.thinking_blocks or []):
+                    result.append({
+                        "type": "reasoning",
+                        "id": tb.signature,
+                        "summary": [{"type": "summary_text", "text": tb.thinking}],
+                    })
             result.append({"role": m.role, "content": m.content})
+        if m.role == "assistant":
+            assistant_turn += 1
     return result
 
 
