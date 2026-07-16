@@ -14,13 +14,13 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-# Idle 轮询间隔（秒），对齐 Go 的 IdlePollInterval = 500ms
+# Idle 轮询间隔（秒），500ms
 IDLE_POLL_INTERVAL = 0.5
 
-# shutdown 消息前缀，对齐 Go 的 ShutdownPrefix
+# shutdown 消息前缀
 SHUTDOWN_PREFIX = "[shutdown]"
 
-# lead 名称，对齐 Go 的 LeadName
+# lead 名称
 LEAD_NAME = "lead"
 
 
@@ -56,7 +56,7 @@ async def _wait_for_next_prompt_or_shutdown(
 ) -> tuple[str, bool]:
     """阻塞轮询邮箱，等到有新消息后返回 (prompt, is_shutdown)。
 
-    对齐 Go 的 waitForNextPromptOrShutdown：循环 sleep + 检查邮箱。
+    循环 sleep + 检查邮箱。
     收到 shutdown 消息返回 ("", True)；否则把普通消息拼成下一轮的 prompt。
     """
     while True:
@@ -158,7 +158,7 @@ def spawn_inprocess_teammate(
                     progress.last_message = text
 
     async def _run() -> str:
-        """teammate 主循环，对齐 Go 的 RunInProcessTeammate。
+        """teammate 主循环。
 
         有 mailbox 时进入长驻循环：执行 agent → 发 idle 通知 → 轮询等待新任务。
         没有 mailbox 时退化为单次执行（向后兼容）。

@@ -35,8 +35,7 @@ class Mailbox:
     """Single-file mailbox with file locking, one JSON array per agent.
 
     Each agent's inbox is stored as ``{agent_id}.json`` under *base_dir*.
-    A companion ``.lock`` file is used for mutual exclusion (matching the
-    Go/Java/TS implementation).
+    A companion ``.lock`` file is used for mutual exclusion.
     """
 
     def __init__(self, base_dir: str | Path) -> None:
@@ -61,7 +60,7 @@ class Mailbox:
         """Acquire a file lock, read inbox, apply *fn* mutation, write back."""
         lock_file = self._lock_path(agent_id)
 
-        # Acquire lock with retries (matching Go: 10 attempts, stale > 10s)
+        # Acquire lock with retries (10 attempts, stale > 10s)
         lock_fd = None
         last_err: Exception | None = None
         for _ in range(10):

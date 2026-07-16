@@ -37,10 +37,6 @@ class SkillLoader:
             if skill.name not in seen:
                 seen[skill.name] = skill
 
-        for skill in self._load_builtins():
-            if skill.name not in seen:
-                seen[skill.name] = skill
-
         self._skills = seen
         self._cache = {k: v for k, v in seen.items()}
         self._snapshot_dir_mod_times()
@@ -59,7 +55,7 @@ class SkillLoader:
                     skill.source_path = entry
                     results.append(skill)
                 elif entry.is_dir():
-                    # 优先尝试 skill.yaml + prompt.md 格式（对齐 Go 版）
+                    # 优先尝试 skill.yaml + prompt.md 格式
                     skill_yaml = entry / "skill.yaml"
                     if skill_yaml.is_file():
                         skill = self._parse_skill_yaml(skill_yaml, entry)
@@ -80,7 +76,7 @@ class SkillLoader:
 
     @staticmethod
     def _parse_skill_yaml(yaml_path: Path, skill_dir: Path) -> SkillDef | None:
-        """解析 skill.yaml + prompt.md 格式的 skill（对齐 Go 版 parseFrontmatterOnly + loadSkillBody）。"""
+        """解析 skill.yaml + prompt.md 格式的 skill。"""
         try:
             data = yaml_path.read_text(encoding="utf-8")
             meta = yaml.safe_load(data)
@@ -130,11 +126,6 @@ class SkillLoader:
             source_path=prompt_md if prompt_md.is_file() else yaml_path,
             is_directory=True,
         )
-
-    def _load_builtins(self) -> list[SkillDef]:
-        """内置 skill 已移除，返回空列表。"""
-        return []
-
 
     def get(self, name: str) -> SkillDef | None:
         skill = self._skills.get(name)

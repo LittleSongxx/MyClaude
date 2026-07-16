@@ -38,7 +38,7 @@ def detect_pane_backend(
     teammate_mode: str = "",
     is_interactive: bool = True,
 ) -> BackendType:
-    """检测 pane 后端，对齐 Go 的 detectPaneBackend。
+    """检测 pane 后端。
 
     优先级：tmux（已在 session 内）> iTerm2 > tmux（已安装）> in-process 兜底。
     当没有任何外部终端复用器可用时，静默回退到 in-process，而不是抛异常。
@@ -55,6 +55,6 @@ def detect_pane_backend(
     if _tmux_installed():
         return BackendType.TMUX
 
-    # 对齐 Go：没有可用的 pane 后端时静默回退到 in-process，
+    # 没有可用的 pane 后端时静默回退到 in-process，
     # 而不是抛出异常中断 team 创建流程
     return BackendType.IN_PROCESS

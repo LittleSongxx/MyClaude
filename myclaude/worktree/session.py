@@ -21,7 +21,7 @@ def save_worktree_session(
 ) -> None:
     path = _session_path(myclaude_dir)
     if session is None:
-        # 对齐 Go：传入 nil 时直接删除文件而非写空 JSON，
+        # 传入 None 时直接删除文件而非写空 JSON，
         # 避免遗留无意义的空文件。文件不存在时静默忽略。
         path.unlink(missing_ok=True)
         return

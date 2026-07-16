@@ -977,7 +977,7 @@ async def auto_compact(
         # 手动压缩（/compact）：直接走压缩流程，不检查阈值
         pass
     else:
-        # 双阈值判断，对齐 Go ManageContext 逻辑：
+        # 双阈值判断：
         # 1) 软触发线（auto margin 13K）：低于此线不需要压缩
         soft_threshold = compute_compact_threshold(context_window, manual=False)
         if current < soft_threshold:

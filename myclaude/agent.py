@@ -317,7 +317,7 @@ class Agent:
         # 在 run() 开始时构造；此前为 None（例如 fork 尚未进入循环）。
         self._run_context: RunContext | None = None
         self._loop_count = 0
-        # 记忆提取合并策略（对齐 Go 版 inProgress + pendingContext）：
+        # 记忆提取合并策略：
         # _extracting: 标记是否有提取正在进行
         # _pending_extraction: 提取期间又触发了新请求，保留最新快照做尾随提取
         self._extracting = False
@@ -1525,7 +1525,7 @@ class Agent:
     async def _extract_memories(
         self, conversation: ConversationManager
     ) -> None:
-        """触发记忆提取，对齐 Go 版 inProgress + pendingContext 合并策略。
+        """触发记忆提取，采用 in-progress + pending 合并策略。
 
         当提取正在进行时，新的触发不会启动并发提取，而是标记 _pending_extraction。
         当前提取完成后检查该标志，如果有 pending 则立即执行一次尾随提取，

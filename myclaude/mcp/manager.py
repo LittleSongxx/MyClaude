@@ -43,7 +43,7 @@ class MCPManager:
     async def connect_all(self) -> ConnectResult:
         """连接所有已加载的 MCP 服务器，返回工具列表、服务器信息和错误。
 
-        对齐 Go 版 ConnectAll：连接后从 InitializeResult 提取 instructions，
+        连接后从 InitializeResult 提取 instructions，
         将其包含在 ServerInfo 中返回，供系统提示注入使用。
         """
         result = ConnectResult()

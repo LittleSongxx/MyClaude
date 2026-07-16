@@ -483,7 +483,7 @@ THINKING_VERBS = [
     "Spinning", "Sprouting", "Synthesizing", "Thinking", "Tinkering",
     "Transfiguring", "Transmuting", "Undulating", "Unfurling", "Unravelling",
     "Vibing", "Wandering", "Whisking", "Working", "Wrangling", "Zigzagging",
-]  # 共 105 个动词，与 Go 版 internal/tui/verbs.go 完全一致
+]  # 共 105 个动词
 
 
 class ToolGroupSummary(Static, can_focus=True):

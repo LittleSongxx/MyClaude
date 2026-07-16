@@ -59,7 +59,7 @@ class PermissionChecker:
 
     @staticmethod
     def describe_tool_action(tool: Tool, arguments: dict[str, Any]) -> str:
-        """为 HITL 确认生成人类可读的操作描述（对齐 Go 版 ExtractContent + formatToolArgs）。"""
+        """为 HITL 确认生成人类可读的操作描述。"""
         scope = tool.permission_scope(arguments)
         if scope.description:
             return scope.description

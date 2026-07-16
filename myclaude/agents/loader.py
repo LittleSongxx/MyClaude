@@ -71,7 +71,7 @@ class AgentLoader:
                     tools=meta.get("tools", []),
                     disallowed_tools=meta.get("disallowedTools", []),
                     model=str(meta.get("model", "inherit")),
-                    max_turns=meta.get("maxTurns") or 200,  # 对齐 Go：未指定时默认 200
+                    max_turns=meta.get("maxTurns") or 200,  # 未指定时默认 200
                     permission_mode=str(meta.get("permissionMode", "default")),
                     background=bool(meta.get("background", False)),
                     file_path=None,
@@ -111,8 +111,6 @@ class AgentLoader:
             if agent_def.agent_type not in seen:
                 seen[agent_def.agent_type] = agent_def
 
-        # 优先级 4：插件（保留，未实现）
-
         self._agents = seen
         return seen
 
@@ -142,6 +140,3 @@ class AgentLoader:
         return [
             (ad.agent_type, ad.when_to_use) for ad in self._agents.values()
         ]
-
-    def register_plugin_source(self, path: Path) -> None:
-        pass

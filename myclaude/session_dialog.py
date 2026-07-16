@@ -33,7 +33,7 @@ def _relative_time(meta: SessionMeta) -> str:
 
 
 class InlineResumeWidget(Vertical, can_focus=True):
-    """内联的会话恢复视图，格式与 Go 版 TUI 保持一致。"""
+    """内联的会话恢复视图。"""
 
     BINDINGS = [
         Binding("up", "cursor_up", "Up", priority=True),

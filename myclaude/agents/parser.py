@@ -10,9 +10,8 @@ from myclaude.memory.instructions import process_includes
 
 log = logging.getLogger(__name__)
 
-# 不再限制白名单——第三方模型名称（如 "glm-5.1"）需要能直通（对齐 Go 版：
-# "actual availability is left to the host's ModelResolver / LLM router"）
-VALID_MODELS: set[str] | None = None  # None 表示接受任意非空字符串
+# 不再限制模型名称白名单——第三方模型名（如 "glm-5.1"）需要能直通，
+# 实际可用性交由 host 的模型路由决定。
 VALID_PERMISSION_MODES = {"default", "acceptEdits", "bypassPermissions", ""}
 
 
@@ -31,7 +30,7 @@ class AgentDef:
     tools: list[str] = field(default_factory=list)
     disallowed_tools: list[str] = field(default_factory=list)
     model: str = "inherit"
-    max_turns: int = 200  # 对齐 Go 默认值
+    max_turns: int = 200  # 默认值
     permission_mode: str = "default"
     background: bool = False
     isolation: str = ""
@@ -120,7 +119,7 @@ def parse_agent_file(path: Path) -> AgentDef:
         tools=meta.get("tools", []),
         disallowed_tools=meta.get("disallowedTools", []),
         model=str(meta.get("model", "inherit")),
-        max_turns=meta.get("maxTurns") or 200,  # 对齐 Go：未指定时默认 200
+        max_turns=meta.get("maxTurns") or 200,  # 未指定时默认 200
         permission_mode=str(meta.get("permissionMode", "default")),
         background=bool(meta.get("background", False)),
         isolation=str(meta.get("isolation", "")),

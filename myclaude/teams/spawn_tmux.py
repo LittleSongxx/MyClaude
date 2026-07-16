@@ -77,7 +77,7 @@ def spawn_tmux_teammate(
         mailbox_dir=mailbox_dir,
     )
 
-    # Create a new tmux window (not split) for the teammate, matching Go
+    # Create a new tmux window (not split) for the teammate
     _run_tmux("new-window", "-d", "-n", window_name, cli_cmd)
 
     log.info("Spawned tmux teammate %s in window %s", teammate_name, window_name)

@@ -19,7 +19,6 @@ def build_diff(old_content: str, new_content: str) -> DiffResult:
 
     利用"编辑只改动中间一小段"的特点，从两端找公共前缀/后缀行，
     避免跑通用的 LCS/Myers diff 算法（对大文件更快，实现也更简单）。
-    算法/输出格式与 Go/Java/TS 版保持一致，保证四语言行为对齐。
     """
     old_lines = old_content.split("\n")
     new_lines = new_content.split("\n")

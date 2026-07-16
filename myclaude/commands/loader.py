@@ -1,4 +1,4 @@
-"""从 .myclaude/commands/ 目录加载自定义 Markdown 命令（对齐 Go 版 loader.go）。
+"""从 .myclaude/commands/ 目录加载自定义 Markdown 命令。
 
 每个 .md 文件对应一个 prompt 类型命令，文件名（去掉后缀、小写化）即命令名。
 支持可选的 YAML frontmatter（description / argument-hint / aliases）。
@@ -50,7 +50,7 @@ def _first_non_header_line(body: str) -> str:
 
 
 def _make_prompt_handler(body: str):
-    """构建 prompt 类型命令的处理函数（对齐 Go 版 promptHandler）。
+    """构建 prompt 类型命令的处理函数。
 
     支持 $ARGUMENTS 占位符替换；若正文没有占位符且用户给了参数，
     追加 "## User Request" 段落。
@@ -89,7 +89,7 @@ def load_dir(directory: str) -> list[Command]:
 
 
 def _parse_command_file(base_dir: Path, path: Path) -> Command | None:
-    """解析单个 .md 命令文件（对齐 Go 版 parseCommandFile）。"""
+    """解析单个 .md 命令文件。"""
     try:
         data = path.read_text(encoding="utf-8")
     except OSError:
@@ -132,7 +132,7 @@ def _parse_command_file(base_dir: Path, path: Path) -> Command | None:
 
 
 def load_user_commands(work_dir: str, *, include_project: bool = True) -> list[Command]:
-    """从用户全局和项目级目录合并加载自定义命令（对齐 Go 版 LoadUserCommands）。
+    """从用户全局和项目级目录合并加载自定义命令。
 
     搜索路径（后者覆盖前者）：
       1. ~/.myclaude/commands/

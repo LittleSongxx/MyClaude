@@ -22,10 +22,10 @@ IMPORTANT:
 
 
 def generate_worktree_name() -> str:
-    """生成 worktree 名称，格式为 agent-a + 7 位十六进制，对齐 Go 的 generateAgentSlug。
+    """生成 worktree 名称，格式为 agent-a + 7 位十六进制。
 
-    Go 使用 "agent-a" + hex.EncodeToString(b)[:7]，其中 b 是 4 字节随机数。
-    4 字节 = 8 位十六进制，截取前 7 位。匹配 Go 的 cleanup 正则 ^agent-a[0-9a-f]{7}$。
+    名称为 "agent-a" + 4 字节随机数的十六进制编码取前 7 位。
+    需匹配 cleanup 正则 ^agent-a[0-9a-f]{7}$。
     """
     return f"agent-a{secrets.token_hex(4)[:7]}"
 

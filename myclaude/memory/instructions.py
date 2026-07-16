@@ -7,7 +7,7 @@ MAX_INCLUDE_DEPTH = 5
 
 
 # ---------------------------------------------------------------------------
-# @include 指令格式（对齐 Go 版）
+# @include 指令格式
 # ---------------------------------------------------------------------------
 # 支持以下格式：
 #   @./relative/path  @../relative/path  @~/home/path  @/absolute/path
@@ -18,7 +18,7 @@ MAX_INCLUDE_DEPTH = 5
 def _parse_include(trimmed: str) -> str:
     """解析一行文本，提取 @include 路径。
 
-    对齐 Go 版 parseInclude：支持 @./path @../path @~/path @/path 语法，
+    支持 @./path @../path @~/path @/path 语法，
     以及旧格式 "@include path"。返回空字符串表示该行不是 include 指令。
     """
     # 旧格式兼容：@include <path>
@@ -47,7 +47,7 @@ def _parse_include(trimmed: str) -> str:
 def _resolve_include(path: str, base_dir: Path) -> Path:
     """将 include 路径解析为绝对路径。
 
-    对齐 Go 版 resolveInclude：~/ 展开为 home，相对路径基于 base_dir 解析。
+    ~/ 展开为 home，相对路径基于 base_dir 解析。
     """
     if path.startswith("~/"):
         return Path.home() / path[2:]
@@ -63,7 +63,7 @@ def process_includes(
     depth: int = 0,
     seen: set[str] | None = None,
 ) -> str:
-    """展开 @include 指令，对齐 Go 版 expandIncludes。
+    """展开 @include 指令。
 
     - 循环检测：通过 seen 集合记录已包含文件的绝对路径，防止 A→B→A 无限递归
     - 代码块跳过：``` 围栏代码块内的 @include 不展开
@@ -141,7 +141,7 @@ def _find_git_root(start: Path) -> Path | None:
 
 
 def _project_instruction_dirs(work_dir: Path) -> list[Path]:
-    """返回从 git root 到 work_dir 的所有目录（对齐 Go 版 projectInstructionDirs）。
+    """返回从 git root 到 work_dir 的所有目录。
 
     如果 work_dir 不在 git 仓库内，只返回 [work_dir]。
     """
@@ -164,7 +164,7 @@ def _project_instruction_dirs(work_dir: Path) -> list[Path]:
 
 
 def load_instructions(project_root: str, *, include_project: bool = True) -> str:
-    """发现并拼接项目和用户指令文件（对齐 Go 版 LoadInstructions）。
+    """发现并拼接项目和用户指令文件。
 
     发现顺序（低优先级在前，高优先级在后）：
     1. 用户全局：~/.myclaude/MYCLAUDE.md, ~/.myclaude/AGENTS.md

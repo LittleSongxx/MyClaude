@@ -18,7 +18,7 @@ class PromptSection:
 
 @dataclass
 class EnvironmentContext:
-    """运行环境上下文（对齐 Go 版 EnvironmentContext）。"""
+    """运行环境上下文。"""
     work_dir: str
     os_name: str       # 操作系统名称（如 Linux, Darwin）
     arch: str          # 架构（如 x86_64, arm64）
@@ -46,7 +46,7 @@ class PromptBuilder:
 
 
 # ---------------------------------------------------------------------------
-# prompt 分段（对应 Go 版 sections.go，优先级 0-95）
+# prompt 分段（优先级 0-95）
 # ---------------------------------------------------------------------------
 
 IDENTITY_SECTION = PromptSection(
@@ -164,7 +164,7 @@ In code: default to writing no comments. Never write multi-paragraph docstrings 
 
 
 def detect_environment(work_dir: str) -> EnvironmentContext:
-    """检测当前运行环境，返回 EnvironmentContext（对齐 Go 版 DetectEnvironment）。"""
+    """检测当前运行环境，返回 EnvironmentContext。"""
     shell = os.environ.get("SHELL", "bash")
     is_git = False
     branch = ""
@@ -197,7 +197,7 @@ def detect_environment(work_dir: str) -> EnvironmentContext:
 
 
 def environment_section(work_dir: str, env: EnvironmentContext | None = None) -> PromptSection:
-    """构建环境信息 prompt 段落（对齐 Go 版 EnvironmentSection）。"""
+    """构建环境信息 prompt 段落。"""
     if env is None:
         env = detect_environment(work_dir)
     lines = [
@@ -215,7 +215,7 @@ def environment_section(work_dir: str, env: EnvironmentContext | None = None) ->
 
 
 # ---------------------------------------------------------------------------
-# Plan 模式提示语（对应 Go 版 plan_mode.go）
+# Plan 模式提示语
 # ---------------------------------------------------------------------------
 
 _PLAN_MODE_FULL_REMINDER = """\

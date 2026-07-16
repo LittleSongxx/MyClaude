@@ -23,7 +23,7 @@ _OPTIONS = [
 
 
 class InlinePlanWidget(Vertical, can_focus=True):
-    """内联的计划审批组件，格式与 Go 版 TUI 保持一致。"""
+    """内联的计划审批组件。"""
 
     BINDINGS = [
         Binding("up", "cursor_up", "Up", priority=True),

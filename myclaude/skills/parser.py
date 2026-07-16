@@ -100,7 +100,7 @@ def parse_skill_file(path: Path) -> SkillDef:
 
 
 def substitute_arguments(prompt_body: str, args: str) -> str:
-    """将 $ARGUMENTS 占位符替换为用户请求（对齐 Go 版 promptHandler 逻辑）。
+    """将 $ARGUMENTS 占位符替换为用户请求。
 
     若 prompt_body 中不含 $ARGUMENTS 占位符且 args 非空，
     则将用户请求追加到末尾（append fallback）。

@@ -10,7 +10,7 @@ from textual.widgets import Static
 class InlineAskUserWidget(Vertical, can_focus=True):
     """内联的 AskUser 组件，支持多问题之间的 Tab 切换导航。
 
-    与 Go 版 TUI 保持一致：带 ☐/☑ 勾选标记的导航栏、光标导航、
+    带 ☐/☑ 勾选标记的导航栏、光标导航、
     多选（MultiSelect）切换、"Other" 自定义输入，以及复核/提交视图。
     """
 
