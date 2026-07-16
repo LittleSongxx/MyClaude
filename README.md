@@ -1,79 +1,125 @@
 # MyClaude
 
-MyClaude 是一个使用 Python 3.11+ 实现的终端 Coding Agent。它提供 Textual TUI、非交互 CLI 和带认证的本地 Remote UI，核心目标是把流式模型调用、工具执行、权限控制、长上下文恢复和多 Agent 协作放在同一条可测试的运行链上。
+> 一个运行在终端里的 Coding Agent —— 把流式模型调用、工具执行、权限控制、长上下文恢复和多 Agent 协作，放在同一条可测试的运行链上。
 
-当前版本为 `0.3.0`。核心执行链已经完整，自动压缩、会话恢复、Skills、Hooks、MCP、子 Agent、Team、Worktree 和操作系统沙箱等能力均已有实现；项目仍处于主动开发阶段，更适合作为可实际使用和继续演进的个人 Coding Agent，而不是强隔离、无人值守的生产执行平台。
+MyClaude 用 Python 3.11+ 实现，提供三种入口：交互式 Textual TUI、非交互 CLI（`-p`）以及带令牌认证的本地浏览器 UI（`--remote`）。三种入口共享同一套核心运行时与工具面，差异只来自是否具备交互式界面。
 
-> MyClaude 是独立项目，不是 Anthropic 官方产品，也不承诺兼容 Claude Code 的命令、配置或会话格式。
+它兼容 Anthropic、OpenAI 及 OpenAI-compatible 三类流式协议，内置文件读写、精确编辑、Shell、代码搜索、子 Agent、Team、Git Worktree 隔离、Skills、Hooks 与 MCP，并带有自动上下文压缩、会话恢复、项目记忆和可选的操作系统级命令沙箱。
 
-## 核心能力
+> [!NOTE]
+> MyClaude 是一个独立的实验性项目，**不是 Anthropic 官方产品**，也不承诺兼容 Claude Code 的命令、配置或会话格式。它更适合作为可实际使用、可持续演进的个人 Coding Agent，而不是强隔离、无人值守的生产执行平台。
 
-- 支持 Anthropic Messages、OpenAI Responses 和 OpenAI-compatible Chat Completions 三种流式协议。
-- 使用统一事件流处理文本、思考内容、工具调用、权限请求、Hooks、重试、压缩和用量统计。
-- 内置文件读写、精确编辑、删除、Glob、Grep、Bash、Worktree、Skills、Agent 和 Team 工具。
-- 工具调用仅在模型响应完整结束且 stop reason 合法后执行；写入、命令和 Agent 工具保持顺序执行。
-- 文件写入采用原子替换；编辑和删除要求近期读取状态，避免静默覆盖外部并发修改。
-- 支持大型工具结果落盘、引用感知清理、主动压缩和真实 API context overflow 后的一次响应式压缩重试。
-- 支持 schema 版本化的 JSONL 会话、压缩边界、文件历史、回退、项目记忆和恢复上下文。
-- 支持 workspace trust、四种权限模式、用户/项目规则、危险命令硬拦截和可选 OS 级 Bash 沙箱。
-- 支持共享用量账本、模型调用用途分类、成本估算以及 turn、时间、token、成本四类运行上限。
-- 流式输出期间的新消息会排队进入下一轮；可取消的 Bash/Agent 调用可被转向消息打断，文件写入不会被中途取消。
+---
+
+## 目录
+
+- [核心特性](#核心特性)
+- [架构](#架构)
+- [三种入口对比](#三种入口对比)
+- [安装](#安装)
+- [快速开始](#快速开始)
+- [配置](#配置)
+- [权限与安全](#权限与安全)
+- [工具集](#工具集)
+- [扩展机制](#扩展机制)
+- [上下文、会话与记忆](#上下文会话与记忆)
+- [斜杠命令](#斜杠命令)
+- [数据与目录布局](#数据与目录布局)
+- [开发与测试](#开发与测试)
+- [评测](#评测)
+- [已知限制](#已知限制)
+- [致谢](#致谢)
+
+---
+
+## 核心特性
+
+- **多协议流式**：`anthropic`（Messages）、`openai`（Responses）、`openai-compat`（Chat Completions）三类后端，统一的错误分类与用量上报。支持 thinking / reasoning、Anthropic 提示缓存与加密 reasoning 续写。
+- **统一事件流**：文本、思考、工具调用、权限请求、AskUser、Hooks、重试、压缩、用量都以同一套事件驱动，TUI / Headless / Remote 三端复用。
+- **稳健的工具执行**：工具仅在模型响应完整结束、`stop_reason` 合法后才执行。只读工具按批并发，写入 / Bash / Agent 等非并发安全工具保持顺序独占。文件写入原子替换，编辑与删除要求近期读取状态以避免静默覆盖外部并发修改。
+- **长上下文恢复**：两层上下文管理——超预算工具结果落盘 + 引用感知清理，以及接近窗口上限时的对话摘要压缩；真实 API context overflow 后还能做一次响应式压缩重试。压缩边界持久化，支持会话恢复。
+- **权限与安全分层**：Workspace Trust、四种权限模式、用户/项目/本地三级规则、灾难性命令硬拦截，以及可选的 bubblewrap / Seatbelt OS 级命令沙箱。
+- **多 Agent 协作**：后台子 Agent、对话 fork、Git Worktree 隔离、基于共享任务与信箱的 Team，以及可选的 Coordinator 编排模式。
+- **可扩展**：Skills、自定义子 Agent、自定义斜杠命令、生命周期 Hooks（command / prompt / http），以及 stdio 与 streamable HTTP 两类 MCP 服务器。
+- **运行预算**：线程安全的共享用量账本，支持成本估算与 turn / 墙钟时间 / token / 成本四类运行上限；预算在主 Agent、子 Agent、压缩、记忆与摘要调用之间共享。
+- **可操控**：流式输出期间到达的新消息排队进入下一轮；可取消的 Bash / Agent 调用可被转向消息打断，而文件写入不会被中途取消。
+
+---
 
 ## 架构
 
 三个入口通过 `RuntimeAssembler` 安装共同能力，并共享同一个 `CoreRuntime`：
 
 ```text
-Textual TUI       myclaude -p       Remote UI
-      \                |                /
-               RuntimeAssembler
-                       |
-                  CoreRuntime
-                       |
-        Agent + Conversation + LLMClient
-                       |
-      ToolRegistry + PermissionChecker
-                       |
- Context / Usage / Memory / Session / Worktree
+   Textual TUI          myclaude -p           Remote UI
+        \                    |                    /
+         \                   |                   /
+                     RuntimeAssembler
+                            |
+                       CoreRuntime
+                            |
+            Agent + Conversation + LLMClient
+                            |
+              ToolRegistry + PermissionChecker
+                            |
+     Context · Usage · Memory · Session · Worktree
 ```
 
 | 模块 | 职责 |
 | --- | --- |
-| `myclaude/agent.py` | Agent 循环、转向消息、重试、工具调度和运行上限 |
-| `myclaude/client.py` | 三类 Provider 客户端、错误分类和用量上报 |
-| `myclaude/runtime.py` | 与界面无关的核心运行时 |
-| `myclaude/runtime_assembler.py` | Skills、Agent、Team、ToolSearch 和 MCP 的统一装配 |
-| `myclaude/model_capabilities.py` | 上下文窗口、默认输出和 thinking 模式注册表 |
-| `myclaude/context/` | Token 预算、大结果持久化、压缩与恢复状态 |
-| `myclaude/permissions/` | 权限模式、规则、路径边界和危险命令检测 |
-| `myclaude/usage.py` | 线程安全用量账本、成本估算和运行限制 |
-| `myclaude/memory/` | 会话、压缩边界、指令、项目记忆和记忆整合 |
-| `myclaude/trust.py` | 仓库根目录解析和 workspace trust 持久化 |
+| `myclaude/agent.py` | Agent 主循环：事件流、重试、转向消息、工具调度、运行上限 |
+| `myclaude/client.py` | 三类 Provider 客户端、错误分类、用量与提示缓存 |
+| `myclaude/runtime.py` | 与界面无关的核心运行时装配 |
+| `myclaude/runtime_assembler.py` | Skills / Agent / Team / ToolSearch / MCP 的统一安装 |
+| `myclaude/model_capabilities.py` | 上下文窗口、默认输出与 thinking 模式注册表 |
+| `myclaude/context/` | Token 预算、大结果落盘、对话压缩与恢复状态 |
+| `myclaude/permissions/` | 权限模式、规则引擎、路径边界、危险命令检测 |
+| `myclaude/usage.py` | 线程安全用量账本、成本估算、运行限制 |
+| `myclaude/memory/` | 项目记忆、召回、提取、整合与会话状态 |
+| `myclaude/worktree/` | Git Worktree 创建、进入/退出、清理与恢复 |
+| `myclaude/teams/` | Team、共享任务、信箱、Coordinator 编排 |
+| `myclaude/hooks/` | 生命周期事件、条件、执行器与引擎 |
+| `myclaude/sandbox/` | bubblewrap（Linux）/ Seatbelt（macOS）OS 级沙箱 |
+| `myclaude/trust.py` | 仓库根解析与 Workspace Trust 持久化 |
 | `myclaude/app.py` | Textual TUI |
-| `myclaude/remote.py` | 带随机令牌认证的本地浏览器 UI |
+| `myclaude/remote.py` | 令牌认证的本地浏览器 UI |
 
-## 三种入口
+---
 
-基础运行时和标准工具面已经统一，差异主要来自是否具备交互式 UI：
+## 三种入口对比
 
 | 能力 | TUI | `-p` | Remote UI |
 | --- | :---: | :---: | :---: |
-| 文件、搜索、Bash、Worktree | 是 | 是 | 是 |
-| 自动/响应式压缩 | 是 | 是 | 是 |
-| Hooks、Skills、MCP | 是 | 是 | 是 |
-| 子 Agent 与 Team 工具 | 是 | 是 | 是 |
-| 安装 Skill | 是 | 否 | 否 |
-| AskUser 与交互式 Plan UI | 是 | 否 | 否 |
-| 项目自定义斜杠命令 | 是 | 不适用 | 是 |
-| 会话持久化 | 是 | 单次运行 | 是 |
-| 完整会话恢复界面 | 是 | 否 | 否 |
-| 完整斜杠命令支持 | 是 | 否 | 部分 |
+| 文件 / 搜索 / Bash / Worktree | ✅ | ✅ | ✅ |
+| 自动 & 响应式压缩 | ✅ | ✅ | ✅ |
+| Hooks / Skills / MCP | ✅ | ✅ | ✅ |
+| 子 Agent 与 Team 工具 | ✅ | ✅ | ✅ |
+| 项目记忆与恢复上下文 | ✅ | ✅ | ✅ |
+| 交互式权限确认 | ✅ | ❌（`ask` 一律拒绝） | ✅ |
+| AskUser 与交互式 Plan UI | ✅ | ❌ | ✅ |
+| Skill 安装 | ✅ | ❌ | ❌ |
+| 项目自定义斜杠命令 | ✅ | 不适用 | ✅ |
+| 会话持久化 | ✅ | 单次运行 | ✅ |
+| 完整会话恢复界面 | ✅ | ❌ | 部分 |
+| 完整斜杠命令支持 | ✅ | ❌ | 部分 |
 
-自动化调用建议使用 `-p --output-format stream-json`。需要人工权限确认、会话恢复、Skill 安装或完整 Plan 流程时使用 TUI。
+- 自动化 / CI 场景建议 `myclaude -p --output-format stream-json`，输出稳定的 NDJSON 事件与退出码。
+- 需要人工权限确认、Plan 审批、AskUser、Skill 安装或完整会话恢复时使用 TUI。
+
+---
 
 ## 安装
 
-### Conda
+要求 Python **3.11+**。项目使用 `hatchling` 构建，可用 uv、conda 或 venv 安装。
+
+### uv（推荐）
+
+```bash
+uv sync --group dev
+uv run myclaude --version
+```
+
+### conda
 
 ```bash
 conda create -n claude python=3.11 -y
@@ -96,34 +142,54 @@ myclaude --version
 myclaude --help
 ```
 
-## Workspace Trust
+---
 
-项目配置可以启动 stdio MCP 进程和 command Hooks，因此 MyClaude 在加载项目级配置和扩展前要求信任当前仓库：
+## 快速开始
 
-- 首次交互启动会显示仓库根目录，并要求输入 `yes`。
-- `-p`、Remote 或非 TTY 启动在未信任时直接退出，不会自动接受项目内容。
-- `--trust-workspace` 显式信任当前仓库根目录。
-- `--no-project-config` 仅使用用户级配置和扩展，不加载项目指令、配置、权限规则、Skills、Agents、命令、记忆或 Worktree 恢复状态。
-- `--revoke-workspace-trust` 撤销当前仓库的信任记录并退出。
+```bash
+# 1. 准备配置
+mkdir -p .myclaude
+cp config.example.yaml .myclaude/config.yaml
 
-信任记录保存在 `~/.myclaude/trusted_workspaces.json`，使用 schema 版本和规范化仓库根路径，写入权限设为 `0600`。信任是持久决定；仓库内容发生变化后不会自动撤销，需要调用者自行复核或显式 revoke。
+# 2. 提供 API Key（推荐用环境变量）
+export ANTHROPIC_API_KEY="your-key"
+
+# 3. 启动交互式 TUI（首次会要求信任当前仓库）
+myclaude
+```
+
+其他常见用法：
+
+```bash
+# 非交互执行，直接打印结果
+myclaude -p "分析当前仓库并修复失败的测试"
+
+# 只做分析，不修改文件
+myclaude -p "定位这个 bug 的根因，不要改代码" --mode plan
+
+# 输出结构化事件流，便于脚本消费
+myclaude -p "检查项目结构" --output-format stream-json
+
+# 自动接受文件编辑（命令仍需确认）
+myclaude --mode acceptEdits
+
+# 启动本地浏览器 UI
+myclaude --remote
+```
+
+---
 
 ## 配置
 
-信任项目后，配置按以下顺序合并，后面的显式字段覆盖前面的字段：
+信任项目后，配置按以下顺序合并，**后面的显式字段覆盖前面的**：
 
-1. `~/.myclaude/config.yaml`
-2. `<work-dir>/.myclaude/config.yaml`
-3. `<work-dir>/.myclaude/config.local.yaml`
+1. `~/.myclaude/config.yaml`（用户级）
+2. `<work-dir>/.myclaude/config.yaml`（项目级）
+3. `<work-dir>/.myclaude/config.local.yaml`（项目本地覆盖）
 
-未信任或使用 `--no-project-config` 时，只读取第一层。可从仓库示例开始：
+未信任仓库或使用 `--no-project-config` 时，只读取第一层。
 
-```bash
-mkdir -p .myclaude
-cp config.example.yaml .myclaude/config.yaml
-```
-
-最小配置：
+最小配置示例：
 
 ```yaml
 providers:
@@ -146,66 +212,50 @@ run_limits:
   max_cost_usd: 0
 ```
 
-所有 `run_limits` 的 `0` 都表示禁用。Token 和成本账本会在父 Agent、子 Agent 和 compact、记忆召回/提取/整理、会话摘要等辅助调用之间共享。`max_cost_usd` 只有在 Provider 配置了价格后才有实际约束意义；该数值是估算，不是供应商账单。
-
-建议通过环境变量提供密钥：
-
-```bash
-export ANTHROPIC_API_KEY="your-key"
-export OPENAI_API_KEY="your-key"
-```
-
 | `protocol` | 后端 API |
 | --- | --- |
 | `anthropic` | Anthropic Messages |
 | `openai` | OpenAI Responses |
-| `openai-compat` | OpenAI-compatible Chat Completions |
+| `openai-compat` | OpenAI-compatible Chat Completions（vLLM / Ollama / Together / Azure 等） |
 
-多个 Provider 可同时配置。TUI 提供选择界面；`-p` 和 Remote 使用列表中的第一个 Provider。Anthropic 协议会尽力从模型端点获取 context window，失败后回退到集中维护的模型能力表和保守默认值。Claude Sonnet/Opus 4.6 在开启 thinking 时使用 adaptive thinking。
+要点：
 
-更多配置项见 [config.example.yaml](config.example.yaml)。
+- API Key 优先取配置中的 `api_key`，否则回退到环境变量（`ANTHROPIC_API_KEY` / `OPENAI_API_KEY`），支持 `${VAR}` 展开。
+- 可同时配置多个 Provider。TUI 提供选择界面；`-p` 与 Remote 使用列表中的第一个。
+- 所有 `run_limits` 的 `0` 表示禁用。`max_cost_usd` 只有在 Provider 配置了价格时才有约束意义，且是**估算值**，不等于供应商账单。
+- Anthropic 协议会尽力从模型端点获取 context window，失败后回退到集中维护的模型能力表与保守默认值。
+- 完整配置项（worktree、sandbox、mcp_servers、hooks、fork、coordinator 等）见 [config.example.yaml](config.example.yaml)。
 
-## 使用
-
-交互式 TUI：
-
-```bash
-myclaude
-myclaude --mode acceptEdits
-myclaude --trust-workspace
-```
-
-非交互运行：
-
-```bash
-myclaude -p "分析当前仓库并修复失败测试"
-myclaude -p "只分析问题，不修改文件" --mode plan
-myclaude -p "检查项目结构" --output-format stream-json
-```
-
-非交互模式无法获得人工确认，因此所有 `ask` 权限请求都会失败关闭。只有调用方显式选择 `--mode bypassPermissions` 时，常规写入和命令才会自动放行。
-
-Remote UI：
-
-```bash
-myclaude --remote
-myclaude --remote --remote-addr 127.0.0.1 --remote-port 18888
-```
-
-终端会打印带随机令牌的 URL。Remote 同一时间只接受一个已认证控制连接；默认没有 TLS，不应直接绑定公网地址。
+---
 
 ## 权限与安全
 
+### Workspace Trust
+
+项目级配置可以启动 stdio MCP 进程和 command Hooks，因此加载项目配置与扩展前，MyClaude 要求先信任当前仓库：
+
+- 首次交互启动会显示仓库根目录并要求输入 `yes`。
+- `-p`、Remote 或非 TTY 启动在未信任时**直接退出**，不会自动接受项目内容。
+- `--trust-workspace` 显式信任当前仓库根目录。
+- `--no-project-config` 仅使用用户级配置与扩展，不加载任何项目指令、配置、规则、Skills、Agents、命令、记忆与 Worktree 恢复状态。
+- `--revoke-workspace-trust` 撤销当前仓库信任并退出。
+
+信任记录写入 `~/.myclaude/trusted_workspaces.json`（schema 版本化、规范化根路径、权限 `0600`、原子写）。信任是持久决定，仓库内容变化后不会自动撤销。
+
+### 权限模式
+
 | 模式 | 读取 | 写入 | 命令 |
-| --- | --- | --- | --- |
+| --- | :---: | :---: | :---: |
 | `default` | 允许 | 询问 | 询问 |
 | `acceptEdits` | 允许 | 允许 | 询问 |
 | `plan` | 允许 | 拒绝 | 拒绝 |
 | `bypassPermissions` | 允许 | 允许 | 允许 |
 
-每个文件和搜索工具自行声明权限匹配内容与路径范围，权限检查器不再依赖集中式参数猜测。子 Agent 请求的权限模式会被限制在父 Agent 权限以内，并继承父级规则和危险命令检测器。
+子 Agent 的权限模式会被限制在父 Agent 之内（`plan < default < acceptEdits < bypass`），并继承父级规则与危险命令检测。
 
-权限规则可放在用户或可信项目中：
+### 权限规则
+
+规则可放在用户或可信项目中，采用 `ToolName(pattern)` 语法，支持 `allow` / `ask` / `deny`：
 
 ```yaml
 - rule: "Bash(git status*)"
@@ -214,58 +264,139 @@ myclaude --remote --remote-addr 127.0.0.1 --remote-port 18888
   effect: deny
 ```
 
-支持 `allow`、`ask`、`deny`。灾难性命令检测先于规则、会话放行和 permission mode，可识别拆分选项、wrapper、绝对程序路径等常见变体，例如递归删除根目录、根目录递归 chmod/chown、`find / -delete` 和磁盘设备破坏操作。
+三级规则（用户 → 项目 → 本地）按序评估，同级内后定义者优先。
 
-结构化文件工具不能修改 `.myclaude/config.yaml`、权限文件和受保护的 Skill 路径，即使处于 `bypassPermissions`。这不等于 Bash 沙箱：未启用 OS 沙箱时，Shell 子进程仍拥有当前用户权限，也无法通过有限的命令解析覆盖所有等价写法。
+### 检查器优先级
 
-可选沙箱支持 Linux bubblewrap 和 macOS Seatbelt。只有沙箱实际可用时，`sandbox.auto_allow` 才会成为命令自动放行的兜底条件。
+权限检查大致按如下顺序收敛：**灾难性命令硬拦截 → 规则 deny/ask → 受保护配置写入拦截 → 路径边界 → 规则 allow → plan 模式白名单 → 只读安全命令放行 → OS 沙箱兜底放行 → 会话级放行 → 模式矩阵兜底**。
 
-## Hooks
+- **灾难性命令检测**先于一切规则与模式生效。它会解开 `sudo`/`env`/`nice`/`timeout` 等包装，识别递归删根、根目录递归 `chmod/chown`、`find / -delete`、`dd of=/dev/…`、fork bomb、`curl | sh` 等常见变体。
+- **路径沙箱**把读写限制在项目根 + 临时目录内，并对 `.myclaude/config.yaml`、权限文件、`skills/` 等路径**硬拒绝写入**——即便处于 `bypassPermissions`。
+- 可选 **OS 级沙箱**（Linux `bubblewrap` / macOS Seatbelt）为 Bash 提供内核级隔离。仅当沙箱在本机实际可用时，`sandbox.auto_allow` 才会成为命令自动放行的兜底条件。
 
-Hooks 支持 command、prompt 和 HTTP action，以及生命周期条件、once、async 和 pre-tool reject。command Hook 会通过 stdin 接收 JSON，同时在 `MYCLAUDE_HOOK_CONTEXT` 中收到相同内容：
+> [!WARNING]
+> `bypassPermissions` **不是安全沙箱**。未启用 OS 沙箱时，Shell 子进程仍拥有当前用户权限，有限的命令解析也无法覆盖所有等价写法。请只在受控环境中使用。
 
-```json
-{
-  "event": "pre_tool_use",
-  "tool_name": "WriteFile",
-  "tool_args": {"file_path": "src/main.py"},
-  "file_path": "src/main.py",
-  "message": "",
-  "error": ""
-}
+---
+
+## 工具集
+
+内置工具（部分按上下文注册，如 Team / Worktree / Plan 模式相关工具）：
+
+| 类别 | 工具 |
+| --- | --- |
+| 文件 | `ReadFile`、`WriteFile`、`EditFile`、`DeleteFile` |
+| 搜索 | `Glob`、`Grep` |
+| 执行 | `Bash` |
+| 子 Agent | `Agent` |
+| Team | `TeamCreate`、`TeamDelete`、`SendMessage`、`TaskCreate`、`TaskUpdate`、`TaskGet`、`TaskList` |
+| Worktree | `EnterWorktree`、`ExitWorktree` |
+| Skills | `LoadSkill`、`InstallSkill` |
+| 系统 | `ToolSearch`、`AskUserQuestion`、`ExitPlanMode`、`SyntheticOutput` |
+
+其中：
+
+- `ReadFile` 返回带行号内容并缓存文件状态；`WriteFile` / `EditFile` / `DeleteFile` 要求近期读取状态、原子写入并快照进文件历史。
+- `Bash` 合并 stdout/stderr、按进程组超时终止、输出上限 1 MB，可被转向消息取消，并可选套 OS 沙箱。
+- `Glob` / `Grep` 是只读、并发安全工具，自动跳过 `.git` / `.venv` / `node_modules` / `__pycache__` 等目录。
+- `ToolSearch` 用于按需加载「延迟工具」的 schema，控制上下文里的工具描述规模。
+
+---
+
+## 扩展机制
+
+可信项目可提供以下目录（用户级同名目录位于 `~/.myclaude/` 下，项目级优先）：
+
+```text
+.myclaude/skills/      # Skills
+.myclaude/agents/      # 自定义子 Agent
+.myclaude/commands/    # 自定义斜杠命令
 ```
 
-pre-tool command Hook 可输出结构化决定：
+### 子 Agent
+
+Markdown + YAML frontmatter（`name`、`description`、`tools`、`model`、`maxTurns`、`permissionMode`、`background`、`isolation` 等）。加载优先级：项目 > 用户 > 内置。内置类型：
+
+- `general-purpose` —— 全工具、独立上下文的通用体。
+- `Explore` —— 只读检索（禁用写工具）。
+- `Plan` —— 只读架构师，输出实现计划与关键文件。
+- `Verification` —— 只读缺陷猎手，后台运行，输出 `VERDICT`（需 `enable_verification_agent`）。
+
+`subagent_type` 留空且开启 `enable_fork` 时，会 **fork 当前对话**（继承完整历史，后台运行）。
+
+### Team 与 Coordinator
+
+`TeamManager` 在 `~/.myclaude/teams/<slug>/` 下维护共享任务与文件信箱，每个成员运行在独立 Git Worktree 中。后端支持 `in-process`（最可移植，默认）、`tmux`、`iterm2`。开启 Coordinator 模式后，主 Agent 作为编排者，通过 `Agent` / `SendMessage` / `Task*` 委派给 worker。
+
+### Skills
+
+可复用的提示包，支持单文件 `.md` 或 `skill.yaml` + `prompt.md` 目录形式，`mode` 可选 `inline`（注入当前对话）或 `fork`（在新 Agent 中执行）。支持 `$ARGUMENTS` 替换，`InstallSkill` 可从 GitHub 类 URL 安装到 `~/.myclaude/skills/`。
+
+### Hooks
+
+生命周期事件（`session_start/end`、`turn_start/end`、`pre_tool_use`、`post_tool_use`、`pre_send`、`post_receive` 等）上挂载动作，支持条件表达式、`once`、`async`、pre-tool reject。动作类型：
+
+- `command` —— 子进程，通过 stdin 与 `MYCLAUDE_HOOK_CONTEXT` 环境变量收到 JSON 上下文；占位符经 `shlex.quote` 转义防注入。
+- `prompt` —— 注入提示消息。
+- `http` —— HTTP 回调。
+- `agent` —— **尚未实现，会显式返回失败**而非伪报成功。
+
+`pre_tool_use` 的 command Hook 可输出结构化决定阻断工具调用：
 
 ```json
 {"decision": "deny", "reason": "generated files are read-only"}
 ```
 
-`decision` 支持 `allow` 和 `deny`。普通文本输出仍被记录为通知。`agent` Hook action 目前尚未实现，会明确返回失败而不会伪报成功。
+### MCP
 
-## 扩展目录
+支持 **stdio**（command/args/env）与 **streamable HTTP**（url/headers）两类服务器。工具统一命名为 `mcp__<server>__<tool>`，并把服务器 instructions 注入对话。TUI、`-p` 与 Remote 都会连接已配置服务器。
 
-可信项目可提供：
+### 项目指令
 
-```text
-.myclaude/skills/
-.myclaude/agents/
-.myclaude/commands/
-```
+从 Git 根目录到当前工作目录逐层加载 `MYCLAUDE.md` / `AGENTS.md`（含 `MYCLAUDE.local.md`），用户级指令位于 `~/.myclaude/MYCLAUDE.md` 与 `~/.myclaude/AGENTS.md`。
 
-项目指令支持从 Git 根目录到当前工作目录逐层加载 `MYCLAUDE.md` 和 `AGENTS.md`，并支持 `MYCLAUDE.local.md`。用户级指令位于 `~/.myclaude/MYCLAUDE.md` 和 `~/.myclaude/AGENTS.md`。
+---
 
-MCP 工具统一命名为 `mcp__<server>__<tool>`。TUI、`-p` 和 Remote 都会连接已配置服务器并把服务器 instructions 注入对话。
+## 上下文、会话与记忆
 
-## 会话与数据
+- **上下文压缩（两层）**：Layer 1 把超过 50K 字符的单个工具结果落盘到 `.myclaude/session/tool-results/`（带路径穿越防护与 `0600` 权限），并做引用感知清理；Layer 2 在接近窗口上限时用无工具的 LLM 调用摘要历史前缀，保留近期消息尾部。结构化 `compact_boundary` 会被持久化以支持恢复。
+- **恢复上下文**：压缩后自动重附最近读取的文件内容与已激活 Skill 的 SOP，尽量减少压缩带来的信息损失。
+- **会话**：JSONL 记录（`SESSION_SCHEMA_VERSION = 1`），无版本的早期记录在内存中迁移，未来版本会被安全拒绝。
+- **项目记忆**：四类记忆 —— `user` / `feedback`（用户级 `~/.myclaude/memory/`）与 `project` / `reference`（项目级 `.myclaude/memory/`）。后台自动提取会过滤密钥类内容，并支持跨会话召回与整合。
 
-会话记录使用 `SESSION_SCHEMA_VERSION = 1`。未带版本的早期记录会在内存中迁移，未来版本会被安全拒绝。自动压缩、API overflow 恢复和 Remote 手动 `/compact` 都会持久化结构化 `compact_boundary`，其中包含摘要和需要原样保留的近期消息。
+---
+
+## 斜杠命令
+
+TUI 内置以下斜杠命令（Remote 部分可用）：
+
+| 命令 | 别名 | 说明 |
+| --- | --- | --- |
+| `/help` | `h`、`?` | 显示帮助 |
+| `/status` | `s` | 显示运行状态 |
+| `/compact` | `c` | 手动压缩上下文 |
+| `/clear` | | 清空对话历史 |
+| `/plan` | `p` | 切换 Plan 模式 |
+| `/review` | | 审查代码改动 |
+| `/session` | | 会话管理与恢复 |
+| `/rewind` | | 回退到先前检查点 |
+| `/memory` | | 记忆管理 |
+| `/permission` | | 权限规则管理 |
+| `/sandbox` | | 沙箱管理 |
+| `/mcp` | | 查看 MCP 服务器状态 |
+| `/skill` | `skills` | 管理 Skill |
+
+此外，可信项目与用户目录下的 Markdown 自定义命令会被加载，子目录形成 `namespace:command` 命名，支持 `$ARGUMENTS` 与 frontmatter。
+
+---
+
+## 数据与目录布局
 
 项目运行状态默认位于 `.myclaude/`：
 
 | 路径 | 内容 |
 | --- | --- |
-| `.myclaude/sessions/` | JSONL 会话、metadata 和压缩边界 |
+| `.myclaude/sessions/` | JSONL 会话、元数据与压缩边界 |
 | `.myclaude/session/tool-results/` | 超预算工具结果与替换记录 |
 | `.myclaude/memory/` | 项目记忆 |
 | `.myclaude/file-history/` | 文件修改历史与回退数据 |
@@ -273,38 +404,73 @@ MCP 工具统一命名为 `mcp__<server>__<tool>`。TUI、`-p` 和 Remote 都会
 | `.myclaude/plans/` | Plan 文档 |
 | `.myclaude/debug.log` | 当前运行日志 |
 
-仓库 `.gitignore` 默认忽略 `.myclaude/`。其中可能包含源码片段、会话和私有上下文，不应提交。
+用户级状态位于 `~/.myclaude/`（配置、信任记录、记忆、Skills、Agents、命令、Team）。
 
-## 已知限制
+> [!IMPORTANT]
+> 仓库默认在 `.gitignore` 中忽略 `.myclaude/`。其中可能包含源码片段、会话与私有上下文，**不应提交**。
 
-- `bypassPermissions` 不是安全沙箱；Shell 的完整语义无法靠模式检测可靠证明安全。
-- Hook 的 `agent` action 仍是占位实现。
-- Remote 支持核心运行和会话持久化，但部分 UI 型斜杠命令及完整会话恢复仍只在 TUI 可用。
-- 模型能力表和未知模型 fallback 需要持续维护；新 Provider 建议显式配置窗口和输出上限。
-- tmux/iTerm2 Team 后端依赖本机终端、Git 和 Worktree 条件；`in-process` 是最可移植模式。
-- 默认测试使用模拟 Provider 和 MCP，不替代针对实际供应商端点的集成测试。
-- 仓库目前没有 `LICENSE` 文件，公开分发或复用前需要补充明确许可证。
+---
 
-## 开发与验证
-
-使用 uv：
+## 开发与测试
 
 ```bash
+# uv
 uv sync --group dev
 uv run pytest -q
 uv run ruff check .
-```
 
-使用 Conda 环境：
-
-```bash
-conda activate claude
+# conda / venv
 pytest -q
 ruff check .
 ```
 
-测试覆盖 Provider 序列化、Agent 循环、运行预算、权限、危险命令、文件工具、上下文压缩、会话迁移、记忆、Worktree、Hooks、MCP、Skills、子 Agent、Team、workspace trust 和三入口运行时装配。
+CI（GitHub Actions）在 Python **3.11** 与 **3.13** 上运行 `ruff check .` 与 `pytest -q`。
 
-## 项目来源
+测试覆盖 Provider 序列化、Agent 循环、运行预算、权限、危险命令、文件工具、上下文压缩与恢复、会话迁移、记忆与整合、Worktree、Hooks、MCP、Skills、子 Agent、Team、Coordinator、Workspace Trust 以及三入口运行时装配。
 
-MyClaude 是自主开发的 Coding Agent。设计研究参考了 Claude Code、mini-swe-agent 和 Mistral Vibe，它们不是本项目的运行时依赖。部分源码文件保留了原始教学资料的来源标记。
+> 默认测试使用模拟 Provider 与 MCP，不替代针对真实供应商端点的集成测试。
+
+---
+
+## 评测
+
+`run_evals.py` 提供一个小而确定的本地 Coding-Agent 评测：用真实 fixture + 确定性 oracle + 版本化 trace 度量成功率、成本与轨迹，而非只看最终文本。
+
+```bash
+# 离线列出发现的任务（无需模型）
+python run_evals.py --list
+
+# 跑全部任务，每个 3 次 trial（需要配好 provider / API key）
+python run_evals.py --trials 3
+
+# 只跑单个任务
+python run_evals.py --task single-file-bug
+
+# 消融对比：关闭记忆 / 子 Agent
+python run_evals.py --no-memory
+python run_evals.py --no-subagent
+```
+
+任务以 `evals/<task>/task.yaml` + `repo/` fixture 声明（当前含 `single-file-bug`、`explain-no-change`），oracle 基于 pytest 退出码、diff 白名单、受保护文件哈希不变与无冲突标记来打分，trace 默认写入 `evals/_out/`。
+
+---
+
+## 已知限制
+
+- `bypassPermissions` 不是安全沙箱；Shell 的完整语义无法靠模式检测可靠证明安全。
+- Hook 的 `agent` action 仍是占位实现，调用会显式失败。
+- Remote 支持核心运行与会话持久化，但部分 UI 型斜杠命令与完整会话恢复仅在 TUI 可用。
+- 模型能力表与未知模型 fallback 需要持续维护；新 Provider 建议显式配置 `context_window` 与 `max_output_tokens`。
+- `tmux` / `iterm2` Team 后端依赖本机终端、Git 与 Worktree 条件；`in-process` 是最可移植模式。
+
+---
+
+## 致谢
+
+MyClaude 是自主开发的 Coding Agent。设计上参考了 Claude Code、mini-swe-agent 与 Mistral Vibe 等项目的思路，它们**不是**本项目的运行时依赖。
+
+---
+
+## 许可证
+
+本项目基于 [MIT License](LICENSE) 发布。
