@@ -1,7 +1,3 @@
-# 来源：公众号@小林coding
-# 后端八股网站：xiaolincoding.com
-# Agent网站：xiaolinnote.com
-# 简历模版：jianli.xiaolinnote.com
 from __future__ import annotations
 
 import hashlib
@@ -379,17 +375,9 @@ def apply_tool_result_budget(
                 tr.content = preview
                 persisted_p1.add(tr.tool_use_id)
 
-        # Pass 2：聚合超限
+        # Pass 2：聚合超限。Pass 1 已就地把超限内容替换为预览，因此这里对所有
+        # tool_results 的当前内容长度求和即为替换后的真实体积。
         remaining = [tr for tr in fresh if tr.tool_use_id not in persisted_p1]
-        total = sum(
-            len(state.replacements[tr.tool_use_id]) if tr.tool_use_id in state.replacements
-            else len(tr.content)
-            for tr in msg.tool_results
-            if tr.tool_use_id not in [r.tool_use_id for r in fresh
-                                       if r.tool_use_id not in persisted_p1
-                                       and r.tool_use_id not in state.replacements]
-        ) + sum(len(tr.content) for tr in remaining)
-        # 重新简单计算：所有 tool_results 的当前内容长度之和
         total = sum(len(tr.content) for tr in msg.tool_results)
         if total > AGGREGATE_CHAR_LIMIT:
             ranked = sorted(remaining, key=lambda tr: len(tr.content), reverse=True)

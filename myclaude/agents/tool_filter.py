@@ -1,8 +1,3 @@
-# 来源：公众号@小林coding
-# 后端八股网站：xiaolincoding.com
-# Agent网站：xiaolinnote.com
-# 简历模版：jianli.xiaolinnote.com
-
 from __future__ import annotations
 
 import copy
@@ -24,15 +19,9 @@ ALL_AGENT_DISALLOWED_TOOLS: frozenset[str] = frozenset({
     "Workflow",
 })
 
-CUSTOM_AGENT_DISALLOWED_TOOLS: frozenset[str] = frozenset({
-    "TaskOutput",
-    "ExitPlanMode",
-    "EnterPlanMode",
-    "Agent",
-    "AskUserQuestion",
-    "TaskStop",
-    "Workflow",
-})
+# 自定义（project/user/plugin）agent 在全局禁用之上的额外限制。目前与全局集合
+# 一致；保留独立定义是为了让第 2 层过滤能在不影响 builtin agent 的前提下继续收紧。
+CUSTOM_AGENT_DISALLOWED_TOOLS: frozenset[str] = ALL_AGENT_DISALLOWED_TOOLS
 
 ASYNC_AGENT_ALLOWED_TOOLS: frozenset[str] = frozenset({
     "ReadFile",

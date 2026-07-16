@@ -1,8 +1,4 @@
 #!/usr/bin/env python3
-# 来源：公众号@小林coding
-# 后端八股网站：xiaolincoding.com
-# Agent网站：xiaolinnote.com
-# 简历模版：jianli.xiaolinnote.com
 """Coding-Agent 本地评测入口（报告 B1）。
 
 用小型真实 fixture + 确定性 oracle + 版本化 trace 证明 Agent 的成功率 / 成本 /

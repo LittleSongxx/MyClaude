@@ -1,8 +1,3 @@
-# 来源：公众号@小林coding
-# 后端八股网站：xiaolincoding.com
-# Agent网站：xiaolinnote.com
-# 简历模版：jianli.xiaolinnote.com
-
 """Eval 闭环测试（报告 B1）。
 
 用 stub solver 端到端验证整条评测链路——隔离 fixture → solver 改动 → 确定性

@@ -1,7 +1,3 @@
-# 来源：公众号@小林coding
-# 后端八股网站：xiaolincoding.com
-# Agent网站：xiaolinnote.com
-# 简历模版：jianli.xiaolinnote.com
 """ProviderContinuationState 测试（报告 A3）。
 
 重点验证设计核心：canonical 与 opaque 分层的存取、response_id 续传句柄、以及

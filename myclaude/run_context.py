@@ -1,7 +1,3 @@
-# 来源：公众号@小林coding
-# 后端八股网站：xiaolincoding.com
-# Agent网站：xiaolinnote.com
-# 简历模版：jianli.xiaolinnote.com
 """Per-run deadline, cancellation, and background-task lifecycle.
 
 一次 Agent run 的运行预算此前分散在各处：``asyncio.timeout`` 只包住 LLM stream，

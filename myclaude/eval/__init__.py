@@ -1,7 +1,3 @@
-# 来源：公众号@小林coding
-# 后端八股网站：xiaolincoding.com
-# Agent网站：xiaolinnote.com
-# 简历模版：jianli.xiaolinnote.com
 """轻量 Coding-Agent 评测闭环（报告 B1）。
 
 回答"你怎么知道 Agent 好用"：用小型真实 fixture + 确定性 oracle + 版本化 trace，
