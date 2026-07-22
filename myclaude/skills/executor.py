@@ -81,9 +81,12 @@ class SkillExecutor:
             StreamText,
         )
 
+        from myclaude.agents.tool_filter import clone_registry_for_fork
+
+        fork_registry = clone_registry_for_fork(self.agent.registry)
         fork_agent = AgentClass(
             client=self.client,
-            registry=self.agent.registry,
+            registry=fork_registry,
             protocol=self.protocol,
             work_dir=self.agent.work_dir,
             max_iterations=self.agent.max_iterations,
@@ -94,7 +97,18 @@ class SkillExecutor:
             hook_engine=self.agent.hook_engine,
             run_limits=getattr(self.agent, "run_limits", None),
             instruction_resolver=getattr(self.agent, "instruction_resolver", None),
+            enable_runtime_contracts=True,
+            persist_runtime_contracts=False,
         )
+        if getattr(fork_agent, "context_ledger", None) is not None:
+            from myclaude.tools.context_ledger import UpdateContextLedgerTool
+
+            fork_registry.register(
+                UpdateContextLedgerTool(
+                    fork_agent.context_ledger,
+                    fork_agent.verification_gate,
+                )
+            )
         fork_agent.activate_skill(
             skill.name,
             prompt,

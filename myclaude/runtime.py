@@ -168,7 +168,18 @@ def build_core_runtime(
         hook_engine=hook_engine,
         run_limits=run_limits,
         recall_fn=recall_fn,
+        enable_runtime_contracts=True,
+        persist_runtime_contracts=workspace_trusted,
     )
+    if agent.context_ledger is not None:
+        from myclaude.tools.context_ledger import UpdateContextLedgerTool
+
+        registry.register(
+            UpdateContextLedgerTool(
+                agent.context_ledger,
+                agent.verification_gate,
+            )
+        )
     from myclaude.filehistory import FileHistory
 
     file_history = FileHistory(root, agent.agent_id)

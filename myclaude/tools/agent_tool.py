@@ -105,6 +105,22 @@ class AgentTool(Tool):
             include_project=self._parent_agent.instruction_resolver.include_project,
         )
 
+    @staticmethod
+    def _install_child_contract_tool(agent: Any) -> None:
+        if (
+            agent.context_ledger is None
+            or agent.registry.get("UpdateContextLedger") is not None
+        ):
+            return
+        from myclaude.tools.context_ledger import UpdateContextLedgerTool
+
+        agent.registry.register(
+            UpdateContextLedgerTool(
+                agent.context_ledger,
+                agent.verification_gate,
+            )
+        )
+
 
     def __init__(
         self,
@@ -274,7 +290,10 @@ class AgentTool(Tool):
             instruction_resolver=self._instruction_resolver_for(
                 definition, self._parent_agent.work_dir
             ),
+            enable_runtime_contracts=True,
+            persist_runtime_contracts=False,
         )
+        self._install_child_contract_tool(sub_agent)
         sub_agent.parent_id = self._parent_agent.agent_id
         sub_agent.trace_id = self._parent_agent.trace_id or self._parent_agent.agent_id
         sub_agent._agent_type = definition.agent_type
@@ -501,7 +520,10 @@ class AgentTool(Tool):
             hook_engine=self._parent_agent.hook_engine,
             run_limits=self._parent_agent.run_limits,
             instruction_resolver=self._instruction_resolver_for(definition, wt.path),
+            enable_runtime_contracts=True,
+            persist_runtime_contracts=False,
         )
+        self._install_child_contract_tool(sub_agent)
         sub_agent.parent_id = self._parent_agent.agent_id
         sub_agent.trace_id = self._parent_agent.trace_id or self._parent_agent.agent_id
         sub_agent.agent_id = agent_id
@@ -718,7 +740,10 @@ class AgentTool(Tool):
             hook_engine=self._parent_agent.hook_engine,
             run_limits=self._parent_agent.run_limits,
             instruction_resolver=self._instruction_resolver_for(definition, wt.path),
+            enable_runtime_contracts=True,
+            persist_runtime_contracts=False,
         )
+        self._install_child_contract_tool(sub_agent)
         sub_agent.parent_id = self._parent_agent.agent_id
         sub_agent.trace_id = self._parent_agent.trace_id or self._parent_agent.agent_id
         sub_agent._agent_type = definition.agent_type

@@ -39,13 +39,16 @@ class AgentSolver:
     async def solve(self, task: EvalTask, work_dir: Path, trace: TraceWriter) -> None:
         # 延迟 import：避免 eval 包在无需真实运行时就拉起整个 runtime 依赖链。
         from myclaude.agent import (
+            CacheContractEvent,
             ErrorEvent,
             LoopComplete,
             PermissionRequest,
             PermissionResponse,
+            OrchestrationEvent,
             ToolResultEvent,
             ToolUseEvent,
             UsageEvent,
+            VerificationEvent,
         )
         from myclaude.conversation import ConversationManager
         from myclaude.runtime import build_core_runtime
@@ -89,6 +92,28 @@ class AgentSolver:
                 target = args.get("file_path") or args.get("command") or args.get("pattern")
                 if target is not None:
                     pending_targets[event.tool_id] = str(target)
+            elif isinstance(event, CacheContractEvent):
+                trace.emit(
+                    "cache_contract",
+                    cache_fingerprint=event.fingerprint,
+                    cache_hit_rate=event.request_hit_rate,
+                    cache_break_reasons=list(event.break_reasons),
+                    success=not event.unexpected_miss,
+                )
+            elif isinstance(event, VerificationEvent):
+                trace.emit(
+                    "verification",
+                    verification_status=event.status,
+                    verification_revision=event.revision,
+                    success=event.status in {"passed", "waived", "not_required"},
+                )
+            elif isinstance(event, OrchestrationEvent):
+                trace.emit(
+                    "orchestration",
+                    orchestration_mode=event.mode,
+                    max_agents=event.max_agents,
+                    success=True,
+                )
             elif isinstance(event, ToolResultEvent):
                 trace.emit(
                     "tool_call",

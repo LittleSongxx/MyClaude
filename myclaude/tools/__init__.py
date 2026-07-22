@@ -139,11 +139,10 @@ class ToolRegistry:
             if name in self._disabled:
                 continue
             is_deferred = getattr(tool, "should_defer", False)
-            if (
-                is_deferred
-                and name not in self._discovered
-                and not self._native_deferred_loading
-            ):
+            # Deferred discovery must not mutate the provider tool prefix.
+            # Native Anthropic keeps every deferred schema present and flagged;
+            # compatible/OpenAI providers expose only the stable dispatcher.
+            if is_deferred and not self._native_deferred_loading:
                 continue
             base = tool.get_schema()
             if protocol in ("openai", "openai-compat"):
@@ -154,11 +153,7 @@ class ToolRegistry:
                     "parameters": base["input_schema"],
                 })
             else:
-                if (
-                    self._native_deferred_loading
-                    and is_deferred
-                    and name not in self._discovered
-                ):
+                if self._native_deferred_loading and is_deferred:
                     base = {**base, "defer_loading": True}
                 schemas.append(base)
         return schemas

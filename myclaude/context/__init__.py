@@ -22,6 +22,7 @@ from myclaude.context.manager import (
     load_replacement_records,
     reconstruct_replacement_state,
 )
+from myclaude.context.ledger import ContextLedger
 
 
 __all__ = [
@@ -30,6 +31,7 @@ __all__ = [
     "CompactEvent",
     "ContentReplacementRecord",
     "ContentReplacementState",
+    "ContextLedger",
     "FileReadRecord",
     "REPLACEMENT_RECORDS_FILENAME",
     "RecoveryState",

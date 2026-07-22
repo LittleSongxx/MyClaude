@@ -343,6 +343,30 @@ class TestLoadSkillTool:
         assert "unknown skill" in result.output
 
     @pytest.mark.asyncio
+    async def test_reload_returns_body_for_already_active_skill(self) -> None:
+        from myclaude.tools.load_skill import LoadSkill, LoadSkillParams
+
+        tool = LoadSkill()
+        loader = MagicMock()
+        agent = MagicMock()
+        agent.activate_skill.return_value = False
+        loader.get.return_value = SkillDef(
+            name="planner",
+            description="Plan",
+            prompt_body="Exact SOP",
+            is_directory=False,
+        )
+        tool.set_loader(loader)
+        tool.set_agent(agent)
+
+        result = await tool.execute(
+            LoadSkillParams(name="planner", reload=True)
+        )
+
+        assert "# Skill: planner" in result.output
+        assert "Exact SOP" in result.output
+
+    @pytest.mark.asyncio
     async def test_not_initialized(self) -> None:
         from myclaude.tools.load_skill import LoadSkill, LoadSkillParams
 

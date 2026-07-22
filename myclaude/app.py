@@ -19,10 +19,12 @@ from textual.widgets.option_list import Option
 from myclaude import __version__
 from myclaude.agent import (
     Agent,
+    CacheContractEvent,
     CompactNotification,
     ErrorEvent,
     HookEvent,
     LoopComplete,
+    OrchestrationEvent,
     PermissionRequest,
     PermissionResponse,
     RetryEvent,
@@ -32,6 +34,7 @@ from myclaude.agent import (
     ToolUseEvent,
     TurnComplete,
     UsageEvent,
+    VerificationEvent,
 )
 from myclaude.client import (
     AuthenticationError,
@@ -1370,6 +1373,26 @@ class MyClaudeApp(App):
 
                 elif isinstance(event, UsageEvent):
                     pass  # token 展示已移除
+
+                elif isinstance(event, CacheContractEvent):
+                    if event.unexpected_miss:
+                        self._show_system_message(
+                            "Prompt cache expected a reusable prefix but reported no hit."
+                        )
+
+                elif isinstance(event, VerificationEvent):
+                    if event.blocked or event.message:
+                        self._show_system_message(
+                            event.message
+                            or f"Verification status: {event.status}"
+                        )
+
+                elif isinstance(event, OrchestrationEvent):
+                    if event.mode != "solo":
+                        self._show_system_message(
+                            f"Orchestration: {event.mode}, up to "
+                            f"{event.max_agents} sub-agent(s)."
+                        )
 
                 elif isinstance(event, HookEvent):
                     status = "✓" if event.success else "✗"

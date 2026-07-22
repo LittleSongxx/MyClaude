@@ -213,9 +213,11 @@ async def _run_prompt(
     workspace_trusted: bool = True,
 ) -> int:
     from myclaude.agent import (
+        CacheContractEvent,
         CompactNotification,
         ErrorEvent,
         LoopComplete,
+        OrchestrationEvent,
         PermissionRequest,
         PermissionResponse,
         RetryEvent,
@@ -225,6 +227,7 @@ async def _run_prompt(
         ToolUseEvent,
         TurnComplete,
         UsageEvent,
+        VerificationEvent,
     )
     from myclaude.client import resolve_context_window
     from myclaude.conversation import ConversationManager
@@ -336,6 +339,7 @@ async def _run_prompt(
                     "output": event.output,
                     "is_error": event.is_error,
                     "elapsed": round(event.elapsed, 3),
+                    "metadata": event.metadata,
                 })
 
         elif isinstance(event, UsageEvent):
@@ -346,6 +350,37 @@ async def _run_prompt(
                     "type": "usage",
                     "input_tokens": event.input_tokens,
                     "output_tokens": event.output_tokens,
+                })
+
+        elif isinstance(event, CacheContractEvent):
+            if is_json:
+                emit_json({
+                    "type": "cache_contract",
+                    "fingerprint": event.fingerprint,
+                    "break_reasons": list(event.break_reasons),
+                    "request_hit_rate": event.request_hit_rate,
+                    "cumulative_hit_rate": event.cumulative_hit_rate,
+                    "unexpected_miss": event.unexpected_miss,
+                })
+
+        elif isinstance(event, VerificationEvent):
+            if is_json:
+                emit_json({
+                    "type": "verification",
+                    "status": event.status,
+                    "blocked": event.blocked,
+                    "message": event.message,
+                    "revision": event.revision,
+                    "evidence": event.evidence,
+                })
+
+        elif isinstance(event, OrchestrationEvent):
+            if is_json:
+                emit_json({
+                    "type": "orchestration",
+                    "mode": event.mode,
+                    "max_agents": event.max_agents,
+                    "reason": event.reason,
                 })
 
         elif isinstance(event, TurnComplete):

@@ -17,6 +17,7 @@ ALL_AGENT_DISALLOWED_TOOLS: frozenset[str] = frozenset({
     "AskUserQuestion",
     "TaskStop",
     "Workflow",
+    "UpdateContextLedger",
 })
 
 # 自定义（project/user/plugin）agent 在全局禁用之上的额外限制。目前与全局集合
@@ -38,6 +39,7 @@ ASYNC_AGENT_ALLOWED_TOOLS: frozenset[str] = frozenset({
     "LoadSkill",
     "SyntheticOutput",
     "ToolSearch",
+    "CallDeferredTool",
     "EnterWorktree",
     "ExitWorktree",
 })
@@ -156,6 +158,7 @@ def build_teammate_tools(
         filtered = {t.name: t for t in parent_registry.list_tools()}
         filtered.pop("TeamCreate", None)
         filtered.pop("TeamDelete", None)
+        filtered.pop("UpdateContextLedger", None)
 
     # 应用 agent 定义中的工具限制
     if definition is not None:
@@ -198,6 +201,8 @@ def clone_registry_for_fork(parent_registry: ToolRegistry) -> ToolRegistry:
 
     forked = ToolRegistry()
     for tool in parent_registry.list_tools():
+        if tool.name == "UpdateContextLedger":
+            continue
         if tool.name == "Agent" and hasattr(tool, "query_source"):
             clone = copy.copy(tool)
             clone.query_source = FORK_QUERY_SOURCE

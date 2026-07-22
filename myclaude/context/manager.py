@@ -609,6 +609,14 @@ class RecoveryState:
                 path=path, content=content, timestamp=time.time()
             )
 
+    def record_file_reference(self, path: str) -> None:
+        if not path:
+            return
+        with self._lock:
+            self._files[path] = FileReadRecord(
+                path=path, content="", timestamp=time.time()
+            )
+
     def record_skill_invocation(self, name: str, body: str) -> None:
         if not name:
             return
@@ -661,6 +669,9 @@ def build_recovery_attachment(
     state: RecoveryState | None,
     tool_schemas: list[Mapping[str, Any]] | None,
     budget: RecoveryBudget | None = None,
+    *,
+    context_ledger: str = "",
+    active_skill_names: list[str] | None = None,
 ) -> str:
     """渲染压缩后附件的四个小节。
 
@@ -679,7 +690,24 @@ def build_recovery_attachment(
         )
     sections: list[str] = []
 
-    if state is not None:
+    if context_ledger:
+        sections.append(context_ledger)
+        if state is not None:
+            files = state.snapshot_files(budget.file_limit)
+            if files:
+                buf = [
+                    "## File pointers\n",
+                    "Re-read these paths before relying on exact bytes:\n",
+                ]
+                buf.extend(f"- {record.path}\n" for record in files)
+                sections.append("".join(buf))
+        if active_skill_names:
+            sections.append(
+                "## Active skills\n"
+                + "\n".join(f"- {name}" for name in active_skill_names)
+                + "\nUse LoadSkill with reload=true if an exact skill body is needed.\n"
+            )
+    elif state is not None:
         files = state.snapshot_files(budget.file_limit)
         if files:
             buf = ["## 最近读过的文件\n",
@@ -969,6 +997,8 @@ async def auto_compact(
     tool_schemas: list[Mapping[str, Any]] | None = None,
     transcript_path: str = "",
     budget_messages: list[Message] | None = None,
+    context_ledger: str = "",
+    active_skill_names: list[str] | None = None,
 ) -> CompactEvent | str | None:
     # 以真实 API 用量为锚点做阈值判断：current_tokens() 返回上次计费基准
     # （input + cache_read + cache_creation + output）加上锚点之后新增消息的
@@ -1031,7 +1061,11 @@ async def auto_compact(
     # 用固定 50k 附件会当场溢出。compute_recovery_budget 对大/未知窗口回退到
     # 原固定常量，对小窗口按比例收紧。
     attachment = build_recovery_attachment(
-        recovery, tool_schemas, budget=compute_recovery_budget(context_window)
+        recovery,
+        tool_schemas,
+        budget=compute_recovery_budget(context_window),
+        context_ledger=context_ledger,
+        active_skill_names=active_skill_names,
     )
     # 重建 = 摘要(user) + 尾部原文。
     new_messages = build_compact_messages(

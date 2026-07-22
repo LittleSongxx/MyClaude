@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from pydantic import BaseModel
@@ -18,8 +19,8 @@ class ToolSearchParams(BaseModel):
 class ToolSearchTool(Tool):
     name = "ToolSearch"
     description = (
-        "Search for and load additional tools that are not immediately available. "
-        "Use query 'select:<name>[,<name>...]' to load specific tools by name, "
+        "Search for and discover deferred tools that are not immediately available. "
+        "Use query 'select:<name>[,<name>...]' to select specific tools by name, "
         "or provide keywords to search by relevance."
     )
     params_model = ToolSearchParams
@@ -34,6 +35,13 @@ class ToolSearchTool(Tool):
     ) -> None:
         self._registry = registry
         self._protocol = protocol
+        if (
+            not registry.native_deferred_loading
+            and registry.get("CallDeferredTool") is None
+        ):
+            from myclaude.tools.deferred_call import CallDeferredTool
+
+            registry.register(CallDeferredTool(registry))
 
 
     def get_schema(self) -> dict[str, Any]:
@@ -77,11 +85,25 @@ class ToolSearchTool(Tool):
             f"{schema.get('description', 'No description')}"
             for schema in schemas
         ]
+        native = self._registry.native_deferred_loading
+        dispatcher_available = self._registry.get("CallDeferredTool") is not None
+        invocation = (
+            "\nCall a discovered tool with CallDeferredTool(tool_name=..., "
+            "arguments=...). The exact parameter schemas are:\n"
+            + json.dumps(schemas, ensure_ascii=False, indent=2)
+            if not native and dispatcher_available
+            else (
+                "\nThe returned tool references make these tools available "
+                "without changing the provider tool prefix."
+                if native
+                else "\nTheir parameter schemas will be included in the next tool request."
+            )
+        )
         return ToolResult(
             output=(
-                f"Found {len(schemas)} tool(s) and loaded them:\n"
+                f"Found {len(schemas)} deferred tool(s):\n"
                 + "\n".join(summaries)
-                + "\nTheir parameter schemas will be included in the next tool request."
+                + invocation
             ),
             metadata={
                 "discovered_tools": [
@@ -97,7 +119,7 @@ class ToolSearchTool(Tool):
                     for schema in schemas
                     if schema.get("name")
                 ]
-                if self._registry.native_deferred_loading
+                if native
                 else []
             ),
         )

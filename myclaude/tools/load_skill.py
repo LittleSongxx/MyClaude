@@ -16,6 +16,10 @@ class LoadSkillParams(BaseModel):
     arguments: str = Field(
         default="", description="Optional arguments substituted into the skill body"
     )
+    reload: bool = Field(
+        default=False,
+        description="Return the full skill body again even when already active",
+    )
 
 
 class LoadSkill(Tool):
@@ -112,6 +116,6 @@ class LoadSkill(Tool):
             activated = self._agent.activate_skill(skill.name, prompt)
 
         header = f"# Skill: {skill.name}\n\n"
-        if activated is False:
+        if activated is False and not params.reload:
             return ToolResult(output=f"Skill '{skill.name}' is already active; reused it.")
         return ToolResult(output=header + prompt)

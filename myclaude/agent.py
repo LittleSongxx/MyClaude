@@ -14,6 +14,7 @@ from typing import Any, AsyncIterator, Awaitable, Callable
 
 from pydantic import ValidationError
 
+from myclaude.cache_contract import CacheContract, CacheInspection, CacheObservation
 from myclaude.client import (
     ContextOverflowError,
     LLMClient,
@@ -35,6 +36,7 @@ from myclaude.context import (
     load_replacement_records,
     reconstruct_replacement_state,
 )
+from myclaude.context.ledger import ContextLedger
 from myclaude.conversation import ConversationManager, ToolResultBlock, ToolUseBlock
 from myclaude.conversation import ThinkingBlock as ConvThinkingBlock
 from myclaude.memory.auto_memory import MemoryManager
@@ -46,6 +48,7 @@ from myclaude.permissions import (
 from myclaude.hooks import HookContext, HookEngine, ToolRejectedError
 from myclaude.hooks.engine import HookNotification
 from myclaude.prompts import build_environment_context, build_plan_mode_reminder, build_system_prompt
+from myclaude.orchestration import OrchestrationController
 from myclaude.run_context import RunContext
 from myclaude.tools import ToolRegistry
 from myclaude.tools.ask_user import AskUserEvent, AskUserTool
@@ -62,6 +65,7 @@ from myclaude.tools.base import (
     ToolResult,
 )
 from myclaude.usage import RunLimits, UsageSnapshot
+from myclaude.verification import VerificationDecision, VerificationGate
 
 log = logging.getLogger(__name__)
 
@@ -110,6 +114,7 @@ class ToolResultEvent:
     total_bytes: int = 0
     next_offset: int | None = None
     content_blocks: list[dict[str, Any]] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -129,6 +134,33 @@ class UsageEvent:
     cache_read: int = 0
     cache_creation: int = 0
     estimated_cost_usd: float = 0.0
+
+
+@dataclass
+class CacheContractEvent:
+    fingerprint: str
+    break_reasons: tuple[str, ...]
+    request_hit_rate: float
+    cumulative_hit_rate: float
+    cache_read: int
+    cache_creation: int
+    unexpected_miss: bool = False
+
+
+@dataclass
+class VerificationEvent:
+    status: str
+    message: str = ""
+    blocked: bool = False
+    revision: int = 0
+    evidence: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class OrchestrationEvent:
+    mode: str
+    max_agents: int
+    reason: str
 
 
 @dataclass
@@ -175,6 +207,9 @@ AgentEvent = (
     | TurnComplete
     | LoopComplete
     | UsageEvent
+    | CacheContractEvent
+    | VerificationEvent
+    | OrchestrationEvent
     | ErrorEvent
     | PermissionRequest
     | AskUserEvent
@@ -300,6 +335,8 @@ class Agent:
         run_limits: RunLimits | None = None,
         recall_fn: Callable[[str], Awaitable[str]] | None = None,
         instruction_resolver: Any | None = None,
+        enable_runtime_contracts: bool = False,
+        persist_runtime_contracts: bool = True,
     ) -> None:
         self.client = client
         self.registry = registry
@@ -313,6 +350,25 @@ class Agent:
         self.context_window = context_window
         self.agent_id: str = uuid.uuid4().hex[:12]
         self.session_dir = ensure_session_dir(work_dir, self.agent_id)
+        self.cache_contract: CacheContract | None = None
+        self.context_ledger: ContextLedger | None = None
+        self.verification_gate: VerificationGate | None = None
+        self.orchestration: OrchestrationController | None = None
+        if enable_runtime_contracts:
+            self.cache_contract = CacheContract(
+                self.work_dir,
+                self.agent_id,
+                persist=persist_runtime_contracts,
+            )
+            self.context_ledger = ContextLedger(
+                self.work_dir,
+                self.agent_id,
+                persist=persist_runtime_contracts,
+            )
+            self.verification_gate = VerificationGate()
+            self.orchestration = OrchestrationController()
+        self._ledger_injected_version = 0
+        self._orchestration_signature = ""
         self.compact_breaker = CompactCircuitBreaker()
         self.replacement_state: ContentReplacementState = create_replacement_state()
         # 保存重建工作上下文所需的快照，在 Layer 2 压缩对话后使用：
@@ -340,7 +396,7 @@ class Agent:
         if memory_manager is not None:
             from myclaude.memory.consolidation import MemoryConsolidator
             self._consolidator = MemoryConsolidator(work_dir)
-        self.session_id: str = ""
+        self._session_id: str = ""
         self.active_skills: dict[str, str] = {}
         self._active_skill_allowed_tools: set[str] = set()
         self._active_skill_disallowed_tools: set[str] = set()
@@ -400,6 +456,36 @@ class Agent:
         return UsageSnapshot(
             input_tokens=self.total_input_tokens,
             output_tokens=self.total_output_tokens,
+        )
+
+    @staticmethod
+    def _cache_contract_event(
+        observation: CacheObservation,
+    ) -> CacheContractEvent:
+        return CacheContractEvent(
+            fingerprint=observation.fingerprint,
+            break_reasons=observation.break_reasons,
+            request_hit_rate=observation.request_hit_rate,
+            cumulative_hit_rate=observation.cumulative_hit_rate,
+            cache_read=observation.cache_read,
+            cache_creation=observation.cache_creation,
+            unexpected_miss=observation.unexpected_miss,
+        )
+
+    def _verification_event(
+        self, decision: VerificationDecision
+    ) -> VerificationEvent:
+        revision = (
+            self.verification_gate.revision
+            if self.verification_gate is not None
+            else 0
+        )
+        return VerificationEvent(
+            status=decision.status,
+            message=decision.message,
+            blocked=decision.blocked,
+            revision=revision,
+            evidence=[item.to_dict() for item in decision.evidence],
         )
 
     def _remaining_wall_time(self) -> float | None:
@@ -478,6 +564,26 @@ class Agent:
                     self.instructions_content = initial
 
     @property
+    def session_id(self) -> str:
+        return self._session_id
+
+    @session_id.setter
+    def session_id(self, value: str) -> None:
+        normalized = str(value or "")
+        self._session_id = normalized
+        owner_id = normalized or getattr(self, "agent_id", "")
+        cache_contract = getattr(self, "cache_contract", None)
+        if cache_contract is not None and owner_id:
+            cache_contract.rebind(owner_id)
+        context_ledger = getattr(self, "context_ledger", None)
+        if context_ledger is not None and owner_id:
+            context_ledger.rebind(owner_id)
+            self._ledger_injected_version = 0
+            verification_gate = getattr(self, "verification_gate", None)
+            if verification_gate is not None:
+                verification_gate.restore(context_ledger.verification)
+
+    @property
     def _transcript_path(self) -> str:
         if self.session_id:
             return str(Path(self.work_dir) / ".myclaude" / "sessions" / f"{self.session_id}.jsonl")
@@ -541,6 +647,62 @@ class Agent:
             ):
                 return msg.content
         return ""
+
+    def _inject_context_ledger(
+        self, conversation: ConversationManager
+    ) -> None:
+        ledger = self.context_ledger
+        if ledger is None or ledger.version <= self._ledger_injected_version:
+            return
+        content = ledger.render_updates(self._ledger_injected_version)
+        if content:
+            conversation.add_system_reminder(content)
+        self._ledger_injected_version = ledger.version
+
+    def _refresh_adaptive_contracts(
+        self,
+        conversation: ConversationManager,
+        *,
+        new_task: bool,
+    ) -> OrchestrationEvent | None:
+        query = self._latest_user_query(conversation)
+        if new_task and query and self.verification_gate is not None:
+            self.verification_gate.start_task()
+        if self.context_ledger is not None:
+            if new_task:
+                self.context_ledger.start_task(query)
+            else:
+                self.context_ledger.apply_steering(query)
+        event: OrchestrationEvent | None = None
+        if self.orchestration is not None and query:
+            decision = self.orchestration.decide(
+                query,
+                self.registry,
+                self.run_limits,
+                plan_mode=self.plan_mode,
+            )
+            signature = (
+                f"{decision.mode}:{decision.max_agents}:{decision.reason}"
+            )
+            if signature != self._orchestration_signature:
+                conversation.add_system_reminder(self.orchestration.reminder())
+                self._orchestration_signature = signature
+            if self.context_ledger is not None:
+                self.context_ledger.set_orchestration(decision.to_dict())
+            event = OrchestrationEvent(
+                mode=decision.mode,
+                max_agents=decision.max_agents,
+                reason=decision.reason,
+            )
+        if (
+            self.context_ledger is not None
+            and self.verification_gate is not None
+        ):
+            self.context_ledger.set_verification(
+                self.verification_gate.snapshot()
+            )
+        self._inject_context_ledger(conversation)
+        return event
 
     def _maybe_start_recall(self, conversation: ConversationManager) -> None:
         """由共享 Runtime 注入 recall_fn 时，Agent 自行启动动态召回。
@@ -616,6 +778,9 @@ class Agent:
         recovery = getattr(self, "recovery_state", None)
         if recovery is not None:
             recovery.record_skill_invocation(name, prompt_body)
+        context_ledger = getattr(self, "context_ledger", None)
+        if context_ledger is not None:
+            context_ledger.update(decisions=[f"activated skill: {name}"])
         return True
 
     def clear_active_skills(self) -> None:
@@ -724,6 +889,11 @@ class Agent:
         if self.memory_manager is not None:
             self._memory_state_at_run_start = self.memory_manager.state_token()
         env_context = self.prepare_conversation(conversation)
+        orchestration_event = self._refresh_adaptive_contracts(
+            conversation, new_task=True
+        )
+        if orchestration_event is not None:
+            yield orchestration_event
         # The deadline starts before lifecycle hooks so every external await in
         # this run shares the same wall-clock budget.
         self._run_context = RunContext.from_wall_time(
@@ -778,11 +948,18 @@ class Agent:
                     yield he
 
             self._consume_mailbox(conversation)
-            self._inject_queued_user_messages(conversation)
+            queued_at_start = self._inject_queued_user_messages(conversation)
+            if queued_at_start:
+                orchestration_event = self._refresh_adaptive_contracts(
+                    conversation, new_task=False
+                )
+                if orchestration_event is not None:
+                    yield orchestration_event
             await self._consume_memory_recall(conversation)
             if self.notification_fn:
                 for note in self.notification_fn():
                     conversation.add_system_reminder(note)
+            self._inject_context_ledger(conversation)
 
             if self.hook_engine:
                 ctx = self._build_hook_context("pre_send")
@@ -856,6 +1033,12 @@ class Agent:
                         recovery=self.recovery_state,
                         tool_schemas=self.registry.get_all_schemas(self.protocol),
                         transcript_path=self._transcript_path,
+                        context_ledger=(
+                            self.context_ledger.render_for_prompt()
+                            if self.context_ledger is not None
+                            else ""
+                        ),
+                        active_skill_names=sorted(self.active_skills),
                     )
                 )
             except TimeoutError:
@@ -873,6 +1056,8 @@ class Agent:
                 apply_tool_result_budget(
                     conversation, self.session_dir, self.replacement_state
                 )
+                if self.context_ledger is not None:
+                    self._ledger_injected_version = self.context_ledger.version
                 yield CompactNotification(
                     before_tokens=compact_result.before_tokens,
                     message=f"上下文已压缩（压缩前 {compact_result.before_tokens:,} tokens）",
@@ -887,6 +1072,14 @@ class Agent:
             while True:
                 collector = StreamCollector()
                 received_event = False
+                cache_inspection: CacheInspection | None = None
+                if self.cache_contract is not None:
+                    cache_inspection = self.cache_contract.inspect(
+                        model=str(getattr(self.client, "model", "")),
+                        system=system,
+                        tools=tools,
+                        messages=conversation.history,
+                    )
                 try:
                     llm_stream = self.client.stream(
                         conversation, system=system, tools=tools
@@ -917,6 +1110,12 @@ class Agent:
                                     self.protocol
                                 ),
                                 transcript_path=self._transcript_path,
+                                context_ledger=(
+                                    self.context_ledger.render_for_prompt()
+                                    if self.context_ledger is not None
+                                    else ""
+                                ),
+                                active_skill_names=sorted(self.active_skills),
                             )
                         )
                     except TimeoutError:
@@ -941,6 +1140,8 @@ class Agent:
                     apply_tool_result_budget(
                         conversation, self.session_dir, self.replacement_state
                     )
+                    if self.context_ledger is not None:
+                        self._ledger_injected_version = self.context_ledger.version
                     yield CompactNotification(
                         before_tokens=recovery_result.before_tokens,
                         message="API context overflow recovered by compacting once",
@@ -974,6 +1175,14 @@ class Agent:
                 break
 
             response = collector.response
+            if self.cache_contract is not None and cache_inspection is not None:
+                cache_observation = self.cache_contract.complete(
+                    cache_inspection,
+                    input_tokens=response.input_tokens,
+                    cache_read=response.cache_read,
+                    cache_creation=response.cache_creation,
+                )
+                yield self._cache_contract_event(cache_observation)
 
             if self.hook_engine:
                 ctx = self._build_hook_context("post_receive", message=response.text)
@@ -1083,6 +1292,21 @@ class Agent:
                 conversation.add_assistant_message(
                     response.text, thinking_blocks=conv_thinking
                 )
+                if self.verification_gate is not None:
+                    verification = self.verification_gate.assess_completion()
+                    if self.context_ledger is not None:
+                        self.context_ledger.set_verification(
+                            self.verification_gate.snapshot()
+                        )
+                    event = self._verification_event(verification)
+                    if verification.blocked:
+                        conversation.add_system_reminder(verification.message)
+                        self._inject_context_ledger(conversation)
+                        yield event
+                        yield TurnComplete(turn=iteration)
+                        continue
+                    if verification.status != "not_required" or verification.message:
+                        yield event
                 self._loop_count += 1
                 if self._should_extract_memories(conversation):
                     self._spawn_background(
@@ -1111,6 +1335,12 @@ class Agent:
                         )
                         break
                 queued_count = self._inject_queued_user_messages(conversation)
+                if queued_count:
+                    orchestration_event = self._refresh_adaptive_contracts(
+                        conversation, new_task=False
+                    )
+                    if orchestration_event is not None:
+                        yield orchestration_event
                 if self.hook_engine:
                     ctx = self._build_hook_context("turn_end")
                     try:
@@ -1233,11 +1463,47 @@ class Agent:
                     )
 
             tool_results: list[ToolResultBlock] = []
+            calls_by_id = {call.tool_id: call for call in response.tool_calls}
             for br in execution_results:
                 if br.is_unknown:
                     consecutive_unknown += 1
                 else:
                     consecutive_unknown = 0
+                original_call = calls_by_id.get(br.tool_id)
+                original_arguments = (
+                    original_call.arguments if original_call is not None else {}
+                )
+                effective_name = str(
+                    br.result.metadata.get("effective_tool_name", br.tool_name)
+                )
+                effective_arguments = br.result.metadata.get(
+                    "effective_arguments", original_arguments
+                )
+                if not isinstance(effective_arguments, dict):
+                    effective_arguments = original_arguments
+                effective_tool = self.registry.get(effective_name)
+                category = (
+                    effective_tool.category if effective_tool is not None else ""
+                )
+                if self.context_ledger is not None:
+                    self.context_ledger.observe_tool(
+                        effective_name,
+                        effective_arguments,
+                        br.result,
+                        category=category,
+                    )
+                verification_changed = False
+                if self.verification_gate is not None:
+                    verification_changed = self.verification_gate.observe(
+                        effective_name,
+                        effective_arguments,
+                        br.result,
+                        category=category,
+                    )
+                    if self.context_ledger is not None:
+                        self.context_ledger.set_verification(
+                            self.verification_gate.snapshot()
+                        )
                 content = self._prepare_tool_result(br.tool_id, br.result)
                 tool_results.append(
                     ToolResultBlock(
@@ -1258,7 +1524,17 @@ class Agent:
                     total_bytes=br.result.total_bytes,
                     next_offset=br.result.next_offset,
                     content_blocks=br.result.content_blocks,
+                    metadata=br.result.metadata,
                 )
+                if verification_changed and self.verification_gate is not None:
+                    yield VerificationEvent(
+                        status=self.verification_gate.status,
+                        revision=self.verification_gate.revision,
+                        evidence=[
+                            item.to_dict()
+                            for item in self.verification_gate.evidence
+                        ],
+                    )
 
             if consecutive_unknown >= 3:
                 yield ErrorEvent(
@@ -1270,7 +1546,13 @@ class Agent:
                 tc.tool_name == "ExitPlanMode" for tc in response.tool_calls
             )
             conversation.add_tool_results_message(tool_results)
-            self._inject_queued_user_messages(conversation)
+            queued_count = self._inject_queued_user_messages(conversation)
+            if queued_count:
+                orchestration_event = self._refresh_adaptive_contracts(
+                    conversation, new_task=False
+                )
+                if orchestration_event is not None:
+                    yield orchestration_event
 
             # 非阻塞 memory recall：工具执行完后检查 prefetch 是否就绪
             await self._consume_memory_recall(conversation)
@@ -1369,6 +1651,29 @@ class Agent:
     ) -> AsyncIterator[
         PermissionRequest | AskUserEvent | tuple[ToolResult, float, bool]
     ]:
+        requested_tool_name = tc.tool_name
+        requested_arguments = tc.arguments
+        if tc.tool_name == "CallDeferredTool" and not tc.parse_error:
+            dispatcher = self.registry.get(tc.tool_name)
+            resolver = getattr(dispatcher, "resolve_target", None)
+            resolved = resolver(tc.arguments) if callable(resolver) else None
+            if resolved is None:
+                result = ToolResult(
+                    output=(
+                        "Deferred tool dispatch failed. Use ToolSearch first, then "
+                        "pass an exact discovered tool name and matching arguments."
+                    ),
+                    is_error=True,
+                )
+                yield result, 0.0, False
+                return
+            target_name, target_arguments = resolved
+            tc = ToolCallComplete(
+                tool_id=tc.tool_id,
+                tool_name=target_name,
+                arguments=target_arguments,
+            )
+
         tool = self.registry.get(tc.tool_name)
         start = time.monotonic()
         is_unknown = False
@@ -1390,6 +1695,15 @@ class Agent:
             elapsed = time.monotonic() - start
             yield result, elapsed, is_unknown
             return
+
+        if self.orchestration is not None:
+            authorized, reason = self.orchestration.authorize(
+                tc.tool_name, tc.arguments
+            )
+            if not authorized:
+                result = ToolResult(output=reason, is_error=True)
+                yield result, time.monotonic() - start, is_unknown
+                return
 
         skill_denied, skill_allowed = self._skill_tool_policy(
             tc.tool_name, tc.arguments, tool
@@ -1598,6 +1912,11 @@ class Agent:
                 output=f"Tool execution error: {e}", is_error=True
             )
 
+        if requested_tool_name != tc.tool_name:
+            result.metadata.setdefault("effective_tool_name", tc.tool_name)
+            result.metadata.setdefault("effective_arguments", tc.arguments)
+            result.metadata.setdefault("dispatcher_tool_name", requested_tool_name)
+            result.metadata.setdefault("dispatcher_arguments", requested_arguments)
         self._snapshot_for_recovery(tc, result)
 
         if self.hook_engine:
@@ -1669,10 +1988,7 @@ class Agent:
     def _snapshot_for_recovery(
         self, tc: ToolCallComplete, result: ToolResult
     ) -> None:
-        """捕获 ReadFile 刚交给模型的内容，以便 Layer 2 压缩对话后
-        auto_compact 能重新附加这些数据。每次 ReadFile 多一次磁盘读取，
-        比从 tool 输出中反向解析行号要划算。
-        """
+        """Keep only a path pointer for post-compaction recovery."""
         if result.is_error or tc.tool_name != "ReadFile":
             return
         path = tc.arguments.get("file_path") if isinstance(tc.arguments, dict) else None
@@ -1681,11 +1997,9 @@ class Agent:
         try:
             tool = self.registry.get(tc.tool_name)
             resolved = tool.resolve_path(path) if tool is not None else Path(path)
-            with resolved.open("r", encoding="utf-8", errors="replace") as fh:
-                content = fh.read()
-        except OSError:
+        except (OSError, RuntimeError, ValueError):
             return
-        self.recovery_state.record_file_read(str(resolved), content)
+        self.recovery_state.record_file_reference(str(resolved))
 
     async def _extract_memories(
         self, conversation: ConversationManager
@@ -1780,6 +2094,12 @@ class Agent:
             recovery=self.recovery_state,
             tool_schemas=self.registry.get_all_schemas(self.protocol),
             transcript_path=self._transcript_path,
+            context_ledger=(
+                self.context_ledger.render_for_prompt()
+                if self.context_ledger is not None
+                else ""
+            ),
+            active_skill_names=sorted(self.active_skills),
         )
         if isinstance(result, CompactEvent):
             env_context = build_environment_context(
@@ -1790,6 +2110,8 @@ class Agent:
             conversation.inject_long_term_memory(
                 self.instructions_content, memory_content
             )
+            if self.context_ledger is not None:
+                self._ledger_injected_version = self.context_ledger.version
             return CompactNotification(
                 before_tokens=result.before_tokens,
                 message=f"上下文已压缩（压缩前 {result.before_tokens:,} tokens）",

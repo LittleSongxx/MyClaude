@@ -22,10 +22,12 @@ from websockets.http11 import Request, Response
 
 from myclaude.agent import (
     Agent,
+    CacheContractEvent,
     CompactNotification,
     ErrorEvent,
     HookEvent,
     LoopComplete,
+    OrchestrationEvent,
     PermissionRequest,
     PermissionResponse,
     RetryEvent,
@@ -35,6 +37,7 @@ from myclaude.agent import (
     ToolUseEvent,
     TurnComplete,
     UsageEvent,
+    VerificationEvent,
 )
 from myclaude.client import resolve_context_window
 from myclaude.commands import (
@@ -459,6 +462,7 @@ class RemoteServer:
                             "output": event.output,
                             "isError": event.is_error,
                             "elapsed": event.elapsed,
+                            "metadata": event.metadata,
                         },
                     })
 
@@ -545,6 +549,40 @@ class RemoteServer:
                         "data": {
                             "inputTokens": event.input_tokens,
                             "outputTokens": event.output_tokens,
+                        },
+                    })
+
+                elif isinstance(event, CacheContractEvent):
+                    await self._broadcast({
+                        "type": "cache_contract",
+                        "data": {
+                            "fingerprint": event.fingerprint,
+                            "breakReasons": list(event.break_reasons),
+                            "requestHitRate": event.request_hit_rate,
+                            "cumulativeHitRate": event.cumulative_hit_rate,
+                            "unexpectedMiss": event.unexpected_miss,
+                        },
+                    })
+
+                elif isinstance(event, VerificationEvent):
+                    await self._broadcast({
+                        "type": "verification",
+                        "data": {
+                            "status": event.status,
+                            "blocked": event.blocked,
+                            "message": event.message,
+                            "revision": event.revision,
+                            "evidence": event.evidence,
+                        },
+                    })
+
+                elif isinstance(event, OrchestrationEvent):
+                    await self._broadcast({
+                        "type": "orchestration",
+                        "data": {
+                            "mode": event.mode,
+                            "maxAgents": event.max_agents,
+                            "reason": event.reason,
                         },
                     })
 

@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any, AsyncIterator
 
 import pytest
 from pydantic import BaseModel
 
 from myclaude.tools import ToolRegistry
 from myclaude.tools.base import Tool, ToolResult
+from myclaude.tools.deferred_call import CallDeferredTool
 from myclaude.tools.impl.tool_search import ToolSearchTool
+from myclaude.agent import Agent
+from myclaude.client import LLMClient
+from myclaude.conversation import ConversationManager
+from myclaude.permissions import Decision
+from myclaude.tools.base import StreamEvent
 
 # ---------------------------------------------------------------------------
 # 辅助工具
@@ -109,40 +116,32 @@ async def test_tool_search_marks_discovered():
 
     assert not result.is_error
     assert "DeferredAlpha" in result.output
-    assert "input_schema" not in result.output
+    assert "input_schema" in result.output
+    assert "CallDeferredTool" in result.output
     assert result.metadata["discovered_tools"] == ["DeferredAlpha"]
     assert reg.is_discovered("DeferredAlpha")
     assert not reg.is_discovered("DeferredBeta")
 
-def test_discovered_in_schemas():
-    """延迟工具一旦被发现，就应出现在 get_all_schemas 的结果中。"""
+def test_discovery_does_not_mutate_non_native_schemas():
+    """发现状态只影响可调用性，不改变下一请求的 schema 前缀。"""
     reg = _make_registry()
-    # 初始时不在 schemas 中
     schemas_before = reg.get_all_schemas()
-    names_before = {s["name"] for s in schemas_before}
-    assert "DeferredAlpha" not in names_before
-
-    # 标记为已发现
     reg.mark_discovered("DeferredAlpha")
-
     schemas_after = reg.get_all_schemas()
-    names_after = {s["name"] for s in schemas_after}
-    assert "DeferredAlpha" in names_after
-    # DeferredBeta 仍未被发现
-    assert "DeferredBeta" not in names_after
+    assert schemas_after == schemas_before
+    assert "DeferredAlpha" not in {s["name"] for s in schemas_after}
 
 
-def test_compatible_anthropic_endpoint_does_not_get_native_extension():
+def test_compatible_anthropic_endpoint_uses_stable_dispatcher():
     reg = _make_registry()
+    reg.register(CallDeferredTool(reg))
     reg.mark_discovered("DeferredAlpha")
 
-    alpha = next(
-        schema
-        for schema in reg.get_all_schemas("anthropic")
-        if schema["name"] == "DeferredAlpha"
-    )
-
-    assert "defer_loading" not in alpha
+    names = {
+        schema["name"] for schema in reg.get_all_schemas("anthropic")
+    }
+    assert "CallDeferredTool" in names
+    assert "DeferredAlpha" not in names
 
 
 @pytest.mark.asyncio
@@ -167,7 +166,7 @@ async def test_native_custom_search_uses_deferred_schemas_and_tool_references():
         for schema in reg.get_all_schemas("anthropic")
         if schema["name"] == "DeferredAlpha"
     )
-    assert "defer_loading" not in discovered
+    assert discovered["defer_loading"] is True
 
 def test_get_deferred_tool_names():
     """get_deferred_tool_names 只返回尚未被发现的延迟工具。"""
@@ -228,7 +227,7 @@ async def test_tool_search_select_multiple():
     result = await search.execute(params)
 
     assert not result.is_error
-    assert "Found 2 tool(s)" in result.output
+    assert "Found 2 deferred tool(s)" in result.output
     assert reg.is_discovered("DeferredAlpha")
     assert reg.is_discovered("DeferredBeta")
 
@@ -269,8 +268,8 @@ def _make_deferred_tool(index: int) -> Tool:
 
     return _T()
 
-def test_deferred_token_savings():
-    """对于 50 个重型工具，延迟加载应能节省至少 90% 的 schema token。"""
+def test_deferred_schema_prefix_is_stable_and_compact():
+    """50 个重型工具的发现状态不应扩大 provider schema 前缀。"""
     import json
 
     reg = ToolRegistry()
@@ -305,22 +304,19 @@ def test_deferred_token_savings():
     for name in deferred_names:
         reg.mark_discovered(name)
 
-    # 测量所有工具都可见时的大小
+    # 发现状态改变后，发送给 provider 的 schema 必须逐字节稳定。
     schemas_all = reg.get_all_schemas("anthropic")
     size_all = len(json.dumps(schemas_all))
 
-    savings = 1 - size_deferred / size_all
-    print(
-        f"\nDeferred token savings: {savings:.1%} "
-        f"(deferred={size_deferred}, all={size_all})"
-    )
-    assert savings >= 0.90, (
-        f"Expected >= 90% savings, got {savings:.1%} "
-        f"(deferred={size_deferred}, all={size_all})"
-    )
+    eager = reg.find_deferred_by_names(deferred_names, "anthropic")
+    eager_size = len(json.dumps(schemas_deferred + eager))
+    savings = 1 - size_deferred / eager_size
+    assert schemas_all == schemas_deferred
+    assert size_all == size_deferred
+    assert savings >= 0.90
 
-def test_deferred_end_to_end_discovery():
-    """端到端测试：延迟工具初始处于隐藏状态，被发现后才出现。"""
+def test_deferred_end_to_end_discovery_keeps_prefix_stable():
+    """端到端：发现后通过 dispatcher 调用，provider schema 保持不变。"""
     reg = ToolRegistry()
 
     # 1 个普通工具
@@ -342,15 +338,76 @@ def test_deferred_end_to_end_discovery():
     assert "DeferredAlpha" in deferred
     assert "DeferredBeta" in deferred
 
-    # --- 发现其中一个 ---
+    reg.register(CallDeferredTool(reg))
+    stable_before = reg.get_all_schemas("anthropic")
+
+    # --- 发现其中一个，但不展开其 schema ---
     reg.mark_discovered("DeferredAlpha")
 
     schemas2 = reg.get_all_schemas("anthropic")
     schema_names2 = {s["name"] for s in schemas2}
-    assert "DeferredAlpha" in schema_names2
+    assert schemas2 == stable_before
+    assert "DeferredAlpha" not in schema_names2
+    assert "CallDeferredTool" in schema_names2
     assert "DeferredBeta" not in schema_names2
 
     # --- 此时 get_deferred_tool_names 只返回另一个 ---
     deferred2 = reg.get_deferred_tool_names()
     assert "DeferredAlpha" not in deferred2
     assert "DeferredBeta" in deferred2
+
+    dispatcher = reg.get("CallDeferredTool")
+    assert isinstance(dispatcher, CallDeferredTool)
+    assert dispatcher.resolve_target(
+        {"tool_name": "DeferredAlpha", "arguments": {"text": "ok"}}
+    ) == ("DeferredAlpha", {"text": "ok"})
+
+
+@pytest.mark.asyncio
+async def test_deferred_dispatch_executes_target_through_agent_runtime():
+    class _UnusedClient(LLMClient):
+        async def stream(
+            self,
+            conversation: ConversationManager,
+            system: str = "",
+            tools: list[dict[str, Any]] | None = None,
+        ) -> AsyncIterator[StreamEvent]:
+            if False:
+                yield  # pragma: no cover
+
+    reg = _make_registry()
+    reg.register(CallDeferredTool(reg))
+    reg.mark_discovered("DeferredAlpha")
+    agent = Agent(_UnusedClient(), reg, "anthropic")
+
+    class _Checker:
+        seen: tuple[str, dict[str, Any]] | None = None
+
+        def check(self, tool: Tool, arguments: dict[str, Any]) -> Decision:
+            self.seen = (tool.name, arguments)
+            return Decision(effect="allow", reason="test")
+
+    checker = _Checker()
+    agent.permission_checker = checker  # type: ignore[assignment]
+
+    from myclaude.tools.base import ToolCallComplete
+
+    call = ToolCallComplete(
+        "call-1",
+        "CallDeferredTool",
+        {
+            "tool_name": "DeferredAlpha",
+            "arguments": {"text": "hello"},
+        },
+    )
+    results = [
+        item async for item in agent._execute_tool(call)
+        if isinstance(item, tuple)
+    ]
+
+    result, _elapsed, is_unknown = results[-1]
+    assert not is_unknown
+    assert not result.is_error
+    assert result.output == "deferred ok"
+    assert result.metadata["effective_tool_name"] == "DeferredAlpha"
+    assert checker.seen == ("DeferredAlpha", {"text": "hello"})

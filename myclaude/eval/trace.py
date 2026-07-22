@@ -56,6 +56,15 @@ class TraceEvent:
     output_tokens: int | None = None
     cache_read_tokens: int | None = None
     cache_write_tokens: int | None = None
+    cache_fingerprint: str | None = None
+    cache_hit_rate: float | None = None
+    cache_break_reasons: list[str] | None = None
+
+    # Runtime contract dimensions
+    verification_status: str | None = None
+    verification_revision: int | None = None
+    orchestration_mode: str | None = None
+    max_agents: int | None = None
 
     # 结束维度
     stop_reason: str | None = None

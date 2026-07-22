@@ -22,6 +22,7 @@ from myclaude.teams.manager import TeamManager
 from myclaude.tools import ToolRegistry
 from myclaude.tools.agent_tool import AgentTool
 from myclaude.tools.ask_user import AskUserTool
+from myclaude.tools.deferred_call import CallDeferredTool
 from myclaude.tools.exit_plan_mode import ExitPlanModeTool
 from myclaude.tools.impl.tool_search import ToolSearchTool
 from myclaude.tools.install_skill import InstallSkillTool
@@ -179,6 +180,8 @@ class RuntimeAssembler:
             and "api.anthropic.com" in self.provider.base_url.casefold()
             and supports_anthropic_tool_search(self.provider.model)
         )
+        if not registry.native_deferred_loading:
+            registry.register(CallDeferredTool(registry))
         registry.register(ToolSearchTool(registry, protocol=self.provider.protocol))
 
         skill_loader = SkillLoader(
