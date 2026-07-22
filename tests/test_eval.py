@@ -144,6 +144,24 @@ class TestOracle:
         (repo / "tests" / "test_calc.py").write_text("# tampered\n", encoding="utf-8")
         assert check_diff_whitelist(repo, ["calc.py"]).passed is False
 
+    def test_diff_whitelist_does_not_accept_shared_string_prefix(
+        self, tmp_path: Path
+    ) -> None:
+        import subprocess
+
+        repo = _make_repo(tmp_path, buggy=False)
+        for args in (
+            ["init", "-q"],
+            ["config", "user.email", "e@e"],
+            ["config", "user.name", "n"],
+            ["add", "-A"],
+            ["commit", "-qm", "base"],
+        ):
+            subprocess.run(["git", *args], cwd=repo, capture_output=True)
+        (repo / "calc.py.backup").write_text("not allowed", encoding="utf-8")
+
+        assert check_diff_whitelist(repo, ["calc.py"]).passed is False
+
     def test_protected_unchanged(self, tmp_path: Path) -> None:
         repo = _make_repo(tmp_path, buggy=True)
         baseline = snapshot_hashes(repo, ["tests/test_calc.py"])
@@ -179,6 +197,7 @@ class TestTask:
         ids = {t.task_id for t in tasks}
         assert "single-file-bug" in ids
         assert "explain-no-change" in ids
+        assert len(tasks) >= 30
 
     def test_load_single_file_bug_spec(self) -> None:
         task = load_task(EVALS_DIR / "single-file-bug")
@@ -265,6 +284,16 @@ class TestRunnerEndToEnd:
         assert report.trials == 3
         assert report.successes == 0
         assert report.success_rate == 0.0
+        assert report.pass_at_k is False
+        assert report.pass_all_k is False
+
+    @pytest.mark.asyncio
+    async def test_multi_trial_consistency_metrics(self, tmp_path: Path) -> None:
+        task = load_task(EVALS_DIR / "explain-no-change")
+        report = await run_task(task, _NoopSolver(), trials=3, out_dir=tmp_path)
+        assert report.pass_at_k is True
+        assert report.pass_all_k is True
+        assert report.aggregate_metrics.llm_calls == 3
 
     @pytest.mark.asyncio
     async def test_trace_written_per_trial(self, tmp_path: Path) -> None:

@@ -19,12 +19,15 @@ from myclaude.eval.oracle import (
     check_no_conflict_markers,
     check_protected_unchanged,
     run_pytest,
+    run_verification_command,
     snapshot_hashes,
 )
-from myclaude.eval.task import EvalTask, discover_tasks, load_task
+from myclaude.eval.task import EvalTask, discover_tasks, load_suite, load_task
 from myclaude.eval.runner import (
     Solver,
+    SuiteReport,
     TaskReport,
+    run_suite,
     run_task,
     run_trial,
 )
@@ -44,12 +47,16 @@ __all__ = [
     "check_no_conflict_markers",
     "check_protected_unchanged",
     "run_pytest",
+    "run_verification_command",
     "snapshot_hashes",
     "EvalTask",
     "load_task",
+    "load_suite",
     "discover_tasks",
     "Solver",
     "TaskReport",
+    "SuiteReport",
+    "run_suite",
     "run_task",
     "run_trial",
     "SCHEMA_VERSION",

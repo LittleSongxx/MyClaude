@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from pydantic import BaseModel
@@ -73,9 +72,32 @@ class ToolSearchTool(Tool):
             if "name" in s:
                 self._registry.mark_discovered(s["name"])
 
+        summaries = [
+            f"- {schema.get('name', '<unknown>')}: "
+            f"{schema.get('description', 'No description')}"
+            for schema in schemas
+        ]
         return ToolResult(
             output=(
-                f"Found {len(schemas)} tool(s). Their full schemas are now loaded:\n\n"
-                f"{json.dumps(schemas, indent=2, ensure_ascii=False)}"
-            )
+                f"Found {len(schemas)} tool(s) and loaded them:\n"
+                + "\n".join(summaries)
+                + "\nTheir parameter schemas will be included in the next tool request."
+            ),
+            metadata={
+                "discovered_tools": [
+                    str(schema.get("name", "")) for schema in schemas
+                ]
+            },
+            content_blocks=(
+                [
+                    {
+                        "type": "tool_reference",
+                        "tool_name": str(schema["name"]),
+                    }
+                    for schema in schemas
+                    if schema.get("name")
+                ]
+                if self._registry.native_deferred_loading
+                else []
+            ),
         )

@@ -26,6 +26,7 @@ def _serialize_conversation(conv: ConversationManager) -> list[dict[str, Any]]:
                     "tool_use_id": tr.tool_use_id,
                     "content": tr.content,
                     "is_error": tr.is_error,
+                    "content_blocks": tr.content_blocks,
                 }
                 for tr in msg.tool_results
             ]
@@ -49,6 +50,7 @@ def _deserialize_conversation(data: list[dict[str, Any]]) -> ConversationManager
                 tool_use_id=tr["tool_use_id"],
                 content=tr["content"],
                 is_error=tr.get("is_error", False),
+                content_blocks=tr.get("content_blocks", []),
             )
             for tr in entry.get("tool_results", [])
         ]

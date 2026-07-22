@@ -14,6 +14,7 @@ import pytest
 
 from myclaude.client import resolve_context_window
 from myclaude.config import ProviderConfig
+from myclaude.model_capabilities import supports_anthropic_tool_search
 from myclaude.validator import (
     ConfigError,
     lookup_model_context_window,
@@ -31,6 +32,20 @@ def _provider(**overrides) -> ProviderConfig:
     )
     base.update(overrides)
     return ProviderConfig(**base)
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        ("claude-sonnet-4-6", True),
+        ("claude-haiku-4-5-20251001", True),
+        ("claude-opus-4-1", False),
+        ("claude-3-7-sonnet", False),
+        ("claude-mythos-5", True),
+    ],
+)
+def test_native_tool_search_model_compatibility(model: str, expected: bool) -> None:
+    assert supports_anthropic_tool_search(model) is expected
 
 
 # ---------------------------------------------------------------------------

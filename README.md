@@ -36,10 +36,10 @@ MyClaude 用 Python 3.11+ 实现，提供三种入口：交互式 Textual TUI、
 
 - **多协议流式**：`anthropic`（Messages）、`openai`（Responses）、`openai-compat`（Chat Completions）三类后端，统一的错误分类与用量上报。支持 thinking / reasoning、Anthropic 提示缓存与加密 reasoning 续写。
 - **统一事件流**：文本、思考、工具调用、权限请求、AskUser、Hooks、重试、压缩、用量都以同一套事件驱动，TUI / Headless / Remote 三端复用。
-- **稳健的工具执行**：工具仅在模型响应完整结束、`stop_reason` 合法后才执行。只读工具按批并发，写入 / Bash / Agent 等非并发安全工具保持顺序独占。文件写入原子替换，编辑与删除要求近期读取状态以避免静默覆盖外部并发修改。
+- **稳健的工具执行**：工具仅在模型响应完整结束、`stop_reason` 合法后才执行。只读工具、后台 Agent 启动和只读子 Agent 可按批并发，写入型调用保持顺序独占。文件写入原子替换，编辑与删除要求近期读取状态以避免静默覆盖外部并发修改；编辑后可通过 LSP 或确定性 fallback 立即返回 diagnostics。
 - **长上下文恢复**：两层上下文管理——超预算工具结果落盘 + 引用感知清理，以及接近窗口上限时的对话摘要压缩；真实 API context overflow 后还能做一次响应式压缩重试。压缩边界持久化，支持会话恢复。
 - **权限与安全分层**：Workspace Trust、四种权限模式、用户/项目/本地三级规则、灾难性命令硬拦截，以及可选的 bubblewrap / Seatbelt OS 级命令沙箱。
-- **多 Agent 协作**：后台子 Agent、对话 fork、Git Worktree 隔离、基于共享任务与信箱的 Team，以及可选的 Coordinator 编排模式。
+- **多 Agent 协作**：后台子 Agent、对话 fork、Git Worktree 隔离、基于共享任务与信箱的 Team，以及可选的 Coordinator 编排模式。子 Agent 权限请求回传主界面，任务状态、独立 JSONL transcript 与 trace 原子持久化，并支持按任务 ID 续跑。
 - **可扩展**：Skills、自定义子 Agent、自定义斜杠命令、生命周期 Hooks（command / prompt / http），以及 stdio 与 streamable HTTP 两类 MCP 服务器。
 - **运行预算**：线程安全的共享用量账本，支持成本估算与 turn / 墙钟时间 / token / 成本四类运行上限；预算在主 Agent、子 Agent、压缩、记忆与摘要调用之间共享。
 - **可操控**：流式输出期间到达的新消息排队进入下一轮；可取消的 Bash / Agent 调用可被转向消息打断，而文件写入不会被中途取消。
@@ -264,7 +264,7 @@ run_limits:
   effect: deny
 ```
 
-三级规则（用户 → 项目 → 本地）按序评估，同级内后定义者优先。
+用户、项目和本地三级规则合并后按 **`deny > ask > allow`** 评估；低层级的 allow 无法覆盖任意层级的 deny。Bash 复合表达式会拆成顶层子命令检查，只有每个子命令都被允许时整条命令才会自动放行；无法可靠解析的命令替换或分组语法保守回退为询问。
 
 ### 检查器优先级
 
@@ -287,7 +287,7 @@ run_limits:
 | --- | --- |
 | 文件 | `ReadFile`、`WriteFile`、`EditFile`、`DeleteFile` |
 | 搜索 | `Glob`、`Grep` |
-| 执行 | `Bash` |
+| 执行 | `Bash`、`BashOutput`、`BashStop` |
 | 子 Agent | `Agent` |
 | Team | `TeamCreate`、`TeamDelete`、`SendMessage`、`TaskCreate`、`TaskUpdate`、`TaskGet`、`TaskList` |
 | Worktree | `EnterWorktree`、`ExitWorktree` |
@@ -296,10 +296,10 @@ run_limits:
 
 其中：
 
-- `ReadFile` 返回带行号内容并缓存文件状态；`WriteFile` / `EditFile` / `DeleteFile` 要求近期读取状态、原子写入并快照进文件历史。
-- `Bash` 合并 stdout/stderr、按进程组超时终止、输出上限 1 MB，可被转向消息取消，并可选套 OS 沙箱。
-- `Glob` / `Grep` 是只读、并发安全工具，自动跳过 `.git` / `.venv` / `node_modules` / `__pycache__` 等目录。
-- `ToolSearch` 用于按需加载「延迟工具」的 schema，控制上下文里的工具描述规模。
+- `ReadFile` 返回带行号的分页视图和 `next_offset`，支持 Notebook cell/output 与图片 artifact；`WriteFile` / `EditFile` / `DeleteFile` 要求近期读取状态、原子写入并快照进文件历史。
+- `Bash` 从启动时就把完整输出写入 owner-only artifact；大输出只内联头尾。显式后台运行或前台超时后返回任务 ID，由 `BashOutput` 查看、`BashStop` 终止，任务元数据跨进程保留。
+- `Glob` / `Grep` 是只读、并发安全工具；`Grep` 优先使用 ripgrep、遵守 `.gitignore`，支持 content/files/count 模式及分页。
+- `ToolSearch` 按需发现延迟工具，只把名称与摘要放入对话。官方 Anthropic 端点额外使用原生 `defer_loading` schema 标记，兼容端点和其他协议保留本地发现路径。
 
 ---
 
@@ -322,7 +322,7 @@ Markdown + YAML frontmatter（`name`、`description`、`tools`、`model`、`maxT
 - `Plan` —— 只读架构师，输出实现计划与关键文件。
 - `Verification` —— 只读缺陷猎手，后台运行，输出 `VERDICT`（需 `enable_verification_agent`）。
 
-`subagent_type` 留空且开启 `enable_fork` 时，会 **fork 当前对话**（继承完整历史，后台运行）。
+`subagent_type` 留空且开启 `enable_fork` 时，会 **fork 当前对话**（继承完整历史，后台运行）。Explore / Plan 保持纯定义指令，其余通用与自定义 Agent 继承父 Agent 的项目指令。后台任务返回的 ID 可通过 `Agent(resume=<task-id>, prompt=...)` 继续，同一任务沿用持久化 transcript。
 
 ### Team 与 Coordinator
 
@@ -330,7 +330,7 @@ Markdown + YAML frontmatter（`name`、`description`、`tools`、`model`、`maxT
 
 ### Skills
 
-可复用的提示包，支持单文件 `.md` 或 `skill.yaml` + `prompt.md` 目录形式，`mode` 可选 `inline`（注入当前对话）或 `fork`（在新 Agent 中执行）。支持 `$ARGUMENTS` 替换，`InstallSkill` 可从 GitHub 类 URL 安装到 `~/.myclaude/skills/`。
+可复用的提示包以目录中的 `SKILL.md`（YAML frontmatter + Markdown）为标准格式；旧的单文件 `.md` 与 `skill.yaml` + `prompt.md` 仍兼容。支持 `context: fork`、`allowed-tools`、`disallowed-tools`、`disable-model-invocation`、`user-invocable`、`argument-hint`、`$ARGUMENTS`、`$0` / `$1` 和受权限检查保护的 ``!`command` `` 动态上下文。模型目录有固定字符预算，重复激活同一 Skill 不会反复注入 SOP。
 
 ### Hooks
 
@@ -353,7 +353,7 @@ Markdown + YAML frontmatter（`name`、`description`、`tools`、`model`、`maxT
 
 ### 项目指令
 
-从 Git 根目录到当前工作目录逐层加载 `MYCLAUDE.md` / `AGENTS.md`（含 `MYCLAUDE.local.md`），用户级指令位于 `~/.myclaude/MYCLAUDE.md` 与 `~/.myclaude/AGENTS.md`。
+启动时从 Git 根目录到当前工作目录逐层加载 `MYCLAUDE.md` / `AGENTS.md`（含 `MYCLAUDE.local.md`），用户级指令位于 `~/.myclaude/MYCLAUDE.md` 与 `~/.myclaude/AGENTS.md`。首次访问更深目录时才懒加载该目录链上的指令。`.myclaude/rules/**/*.md` 可在 frontmatter 中声明 `paths` glob；无 `paths` 的规则启动即加载，有路径的规则仅在首次命中文件时注入一次。
 
 ---
 
@@ -362,7 +362,8 @@ Markdown + YAML frontmatter（`name`、`description`、`tools`、`model`、`maxT
 - **上下文压缩（两层）**：Layer 1 把超过 50K 字符的单个工具结果落盘到 `.myclaude/session/tool-results/`（带路径穿越防护与 `0600` 权限），并做引用感知清理；Layer 2 在接近窗口上限时用无工具的 LLM 调用摘要历史前缀，保留近期消息尾部。结构化 `compact_boundary` 会被持久化以支持恢复。
 - **恢复上下文**：压缩后自动重附最近读取的文件内容与已激活 Skill 的 SOP，尽量减少压缩带来的信息损失。
 - **会话**：JSONL 记录（`SESSION_SCHEMA_VERSION = 1`），无版本的早期记录在内存中迁移，未来版本会被安全拒绝。
-- **项目记忆**：四类记忆 —— `user` / `feedback`（用户级 `~/.myclaude/memory/`）与 `project` / `reference`（项目级 `.myclaude/memory/`）。后台自动提取会过滤密钥类内容，并支持跨会话召回与整合。
+- **Checkpoint**：文件版本、原文件是否存在、快照和备份引用保存在每个 session 的原子 manifest 中。重启后仍可 `/rewind`，新建文件会在回退时正确删除，快照上限和分支截断会清理孤立备份。
+- **项目记忆**：四类记忆 —— `user` / `feedback`（用户级 `~/.myclaude/memory/`）与 `project` / `reference`（项目级 `.myclaude/memory/`）。主 Agent 可显式写记忆；后台提取至少间隔 5 个完成回合，且只在明确记忆/纠正、重复失败或长会话信号出现时运行。若本回合已经直接修改记忆则跳过额外模型调用。
 
 ---
 
@@ -400,6 +401,8 @@ TUI 内置以下斜杠命令（Remote 部分可用）：
 | `.myclaude/session/tool-results/` | 超预算工具结果与替换记录 |
 | `.myclaude/memory/` | 项目记忆 |
 | `.myclaude/file-history/` | 文件修改历史与回退数据 |
+| `.myclaude/agents/` | 子 Agent 任务、独立 transcript 与 trace 状态 |
+| `.myclaude/processes/` | 后台 Bash 任务状态与完整输出 artifact |
 | `.myclaude/worktrees/` | Worktree 状态 |
 | `.myclaude/plans/` | Plan 文档 |
 | `.myclaude/debug.log` | 当前运行日志 |
@@ -451,7 +454,7 @@ python run_evals.py --no-memory
 python run_evals.py --no-subagent
 ```
 
-任务以 `evals/<task>/task.yaml` + `repo/` fixture 声明（当前含 `single-file-bug`、`explain-no-change`），oracle 基于 pytest 退出码、diff 白名单、受保护文件哈希不变与无冲突标记来打分，trace 默认写入 `evals/_out/`。
+任务既可用 `evals/<task>/task.yaml` + `repo/` 独立声明，也可由 `evals/suite.yaml` 复用共享 fixture。当前发现 32 个任务，覆盖跨文件修改、异步竞态、依赖迁移、循环导入、Unicode、路径穿越、CLI 退出码、长日志检索和受约束重构等场景。报告包含 trial success、轨迹指标、`pass@k`（至少一次成功）与 `pass^k`（全部成功）；oracle 基于验证命令、diff 白名单、受保护文件哈希不变与无冲突标记打分，trace 默认写入 `evals/_out/`。
 
 ---
 

@@ -3,6 +3,8 @@ from myclaude.skills.parser import (
     SkillParseError,
     parse_skill_file,
     substitute_arguments,
+    expand_dynamic_context,
+    dynamic_context_commands,
 )
 from myclaude.skills.loader import SkillLoader
 from myclaude.skills.executor import SkillExecutor
@@ -24,4 +26,6 @@ __all__ = [
     "parse_skill_file",
     "parse_skill_url",
     "substitute_arguments",
+    "expand_dynamic_context",
+    "dynamic_context_commands",
 ]

@@ -109,6 +109,8 @@ async def test_tool_search_marks_discovered():
 
     assert not result.is_error
     assert "DeferredAlpha" in result.output
+    assert "input_schema" not in result.output
+    assert result.metadata["discovered_tools"] == ["DeferredAlpha"]
     assert reg.is_discovered("DeferredAlpha")
     assert not reg.is_discovered("DeferredBeta")
 
@@ -128,6 +130,44 @@ def test_discovered_in_schemas():
     assert "DeferredAlpha" in names_after
     # DeferredBeta 仍未被发现
     assert "DeferredBeta" not in names_after
+
+
+def test_compatible_anthropic_endpoint_does_not_get_native_extension():
+    reg = _make_registry()
+    reg.mark_discovered("DeferredAlpha")
+
+    alpha = next(
+        schema
+        for schema in reg.get_all_schemas("anthropic")
+        if schema["name"] == "DeferredAlpha"
+    )
+
+    assert "defer_loading" not in alpha
+
+
+@pytest.mark.asyncio
+async def test_native_custom_search_uses_deferred_schemas_and_tool_references():
+    reg = _make_registry()
+    reg.set_native_deferred_loading(True)
+    search = ToolSearchTool(reg, protocol="anthropic")
+    reg.register(search)
+
+    initial = reg.get_all_schemas("anthropic")
+    alpha = next(schema for schema in initial if schema["name"] == "DeferredAlpha")
+    assert alpha["defer_loading"] is True
+
+    from myclaude.tools.impl.tool_search import ToolSearchParams
+
+    result = await search.execute(ToolSearchParams(query="select:DeferredAlpha"))
+    assert result.content_blocks == [
+        {"type": "tool_reference", "tool_name": "DeferredAlpha"}
+    ]
+    discovered = next(
+        schema
+        for schema in reg.get_all_schemas("anthropic")
+        if schema["name"] == "DeferredAlpha"
+    )
+    assert "defer_loading" not in discovered
 
 def test_get_deferred_tool_names():
     """get_deferred_tool_names 只返回尚未被发现的延迟工具。"""

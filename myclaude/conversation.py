@@ -20,6 +20,7 @@ class ToolResultBlock:
     tool_use_id: str
     content: str
     is_error: bool = False
+    content_blocks: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -51,6 +52,7 @@ def _message_chars(m: Message) -> int:
         n += len(tu.tool_name) + len(json.dumps(tu.arguments, ensure_ascii=False))
     for tr in m.tool_results:
         n += len(tr.content)
+        n += len(json.dumps(tr.content_blocks, ensure_ascii=False))
     return n
 
 

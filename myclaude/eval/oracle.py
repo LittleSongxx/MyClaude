@@ -13,8 +13,11 @@ Agent 而言，正确性来自可复现的客观信号：
 from __future__ import annotations
 
 import subprocess
+from fnmatch import fnmatchcase
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from myclaude.eval.metrics import TrajectoryMetrics
 
 
 @dataclass
@@ -33,6 +36,7 @@ class ScoreCard:
     task_id: str
     trial: int
     results: list[OracleResult] = field(default_factory=list)
+    metrics: TrajectoryMetrics = field(default_factory=TrajectoryMetrics)
 
     @property
     def success(self) -> bool:
@@ -77,6 +81,28 @@ def run_pytest(work_dir: Path, target: str = "", timeout: float = 120.0) -> Orac
     return OracleResult("pytest", passed, detail)
 
 
+def run_verification_command(
+    work_dir: Path, command: list[str], timeout: float = 120.0
+) -> OracleResult:
+    """Run one shell-free verification command declared by an eval task."""
+    label = "verify:" + " ".join(command)
+    try:
+        proc = subprocess.run(
+            command,
+            cwd=str(work_dir),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return OracleResult(label, False, f"timed out after {timeout}s")
+    except FileNotFoundError:
+        return OracleResult(label, False, f"executable not found: {command[0]}")
+    output = (proc.stdout or proc.stderr or "").strip().splitlines()
+    detail = output[-1] if output else f"exit={proc.returncode}"
+    return OracleResult(label, proc.returncode == 0, detail)
+
+
 def _git_changed_files(work_dir: Path) -> list[str] | None:
     """返回相对仓库根的已变更文件（含未跟踪）；非 git 仓库返回 None。"""
     try:
@@ -111,9 +137,16 @@ def check_diff_whitelist(work_dir: Path, allowed: list[str]) -> OracleResult:
     changed = _git_changed_files(work_dir)
     if changed is None:
         return OracleResult("diff_whitelist", False, "not a git repo / git unavailable")
+    def is_allowed(file_path: str, entry: str) -> bool:
+        normalized = entry.strip("/")
+        if any(char in normalized for char in "*?["):
+            return fnmatchcase(file_path, normalized)
+        return file_path == normalized or file_path.startswith(normalized + "/")
+
     offending = [
-        f for f in changed
-        if not any(f == a or f.startswith(a.rstrip("/") + "/") or f.startswith(a) for a in allowed)
+        file_path
+        for file_path in changed
+        if not any(is_allowed(file_path, entry) for entry in allowed)
     ]
     if offending:
         return OracleResult(

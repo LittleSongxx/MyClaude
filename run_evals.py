@@ -71,7 +71,7 @@ def _cmd_list(evals_dir: Path, task_filter: str) -> int:
 
 async def _cmd_run(args: argparse.Namespace) -> int:
     from myclaude.config import load_config
-    from myclaude.eval import run_task
+    from myclaude.eval import run_suite
     from myclaude.eval.agent_solver import AgentSolver
 
     evals_dir = Path(args.evals_dir)
@@ -100,19 +100,21 @@ async def _cmd_run(args: argparse.Namespace) -> int:
         variant = "no-subagent"
     print(f"Running {len(tasks)} task(s) × {args.trials} trial(s)  [variant={variant}]\n")
 
-    reports = []
-    for task in tasks:
-        report = await run_task(task, solver, trials=args.trials, out_dir=out_dir)
-        reports.append(report)
+    suite = await run_suite(tasks, solver, trials=args.trials, out_dir=out_dir)
+    for report in suite.reports:
         print(report.summary())
 
-    total_success = sum(r.successes for r in reports)
-    total_trials = sum(r.trials for r in reports)
-    rate = total_success / total_trials if total_trials else 0.0
-    print(f"\nOverall: {total_success}/{total_trials} passed ({rate:.0%})  [variant={variant}]")
+    print(
+        f"\nOverall: {suite.total_successes}/{suite.total_trials} passed "
+        f"({suite.trial_success_rate:.0%})  [variant={variant}]"
+    )
+    print(
+        f"Task pass@{args.trials}: {suite.pass_at_k_rate:.0%}  "
+        f"pass^{args.trials}: {suite.pass_all_k_rate:.0%}"
+    )
     print(f"Traces written under {out_dir}")
     # 只要有失败就返回非零，方便 CI / 脚本判定。
-    return 0 if total_success == total_trials else 1
+    return 0 if suite.total_successes == suite.total_trials else 1
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -78,9 +78,19 @@ def _mark_last_tool_for_cache(tools: list[dict[str, Any]]) -> list[dict[str, Any
     if not tools:
         return tools
     marked = list(tools)
-    last = dict(marked[-1])
-    last["cache_control"] = _EPHEMERAL
-    marked[-1] = last
+    cache_index = next(
+        (
+            index
+            for index in range(len(marked) - 1, -1, -1)
+            if not marked[index].get("defer_loading", False)
+        ),
+        -1,
+    )
+    if cache_index < 0:
+        return marked
+    cached = dict(marked[cache_index])
+    cached["cache_control"] = _EPHEMERAL
+    marked[cache_index] = cached
     return marked
 
 

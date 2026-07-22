@@ -79,16 +79,18 @@ class PermissionChecker:
         scope = tool.permission_scope(arguments)
         content = scope.content
         path = scope.path
+        category = tool.permission_category(arguments)
+        rule_name = tool.permission_rule_name(arguments)
 
         # Catastrophic commands are denied before every allow-list, rule and
         # permission mode.  Previously a command with a "safe" prefix skipped
         # both this detector and explicit deny rules.
-        if tool.category == "command":
+        if category == "command":
             hit, reason = self.detector.detect(content)
             if hit:
                 return Decision(effect="deny", reason=f"危险命令拦截: {reason}")
 
-        rule_result = self.rule_engine.evaluate(tool.name, content)
+        rule_result = self.rule_engine.evaluate(rule_name, content)
         if rule_result == "deny":
             return Decision(effect="deny", reason="权限规则拒绝")
         if rule_result == "ask":
@@ -97,13 +99,13 @@ class PermissionChecker:
         # Filesystem scope is independent from the text used by permission
         # rules.  Grep/Glob rules match their pattern, while sandboxing checks
         # the base path.
-        if tool.category == "write" and path and self.sandbox.is_write_denied(path):
+        if category == "write" and path and self.sandbox.is_write_denied(path):
             return Decision(effect="deny", reason="受保护的 MyClaude 配置不可写")
 
-        if tool.category in ("read", "write") and path:
+        if category in ("read", "write") and path:
             ok, reason = self.sandbox.check(
                 path,
-                write=tool.category == "write",
+                write=category == "write",
             )
             if not ok and self.mode != PermissionMode.BYPASS:
                 return Decision(effect="ask", reason=f"路径沙箱拦截: {reason}")
@@ -121,20 +123,20 @@ class PermissionChecker:
                 if self._is_plan_file(path):
                     return Decision(effect="allow", reason="Plan mode: plan file write")
 
-        if tool.category == "command" and is_safe_command(content or ""):
+        if category == "command" and is_safe_command(content or ""):
             return Decision(effect="allow", reason="Safe read-only command")
 
         # When the OS sandbox is explicitly configured for auto-allow, it is a
         # final command boundary after dangerous-command and user-rule checks.
-        if self.sandbox_enabled and tool.category == "command":
+        if self.sandbox_enabled and category == "command":
             return Decision(effect="allow", reason="OS 沙箱自动放行")
 
         # Layer 4b: 会话级放行（内存中，优先于模式兜底）
-        if self._check_session_allowed(tool.name, content or ""):
+        if self._check_session_allowed(rule_name, content or ""):
             return Decision(effect="allow", reason="会话级放行（session allow-always）")
 
         # Layer 4: 权限模式兜底判定
-        effect = mode_decide(self.mode, tool.category)
+        effect = mode_decide(self.mode, category)
         if effect == "allow":
             return Decision(effect="allow", reason=f"权限模式 {self.mode.value} 放行")
         if effect == "deny":

@@ -286,14 +286,16 @@ def persist_tool_result(tool_use_id: str, content: str, session_dir: Path) -> Pa
 
 def make_persisted_preview(content: str, file_path: Path) -> str:
     size_kb = len(content.encode("utf-8")) // 1024
-    preview = content[:PREVIEW_CHARS]
+    head = content[:PREVIEW_CHARS]
+    tail = content[-PREVIEW_CHARS:] if len(content) > PREVIEW_CHARS else ""
+    tail_section = f"\n\n预览（末尾 2KB）：\n{tail}" if tail else ""
     return (
         f"{PERSISTED_TAG}\n"
         f"输出太大（{size_kb}KB），完整内容已保存到：\n"
         f"{file_path}\n"
         f"\n"
         f"预览（前 2KB）：\n"
-        f"{preview}\n"
+        f"{head}{tail_section}\n"
         f"</persisted-output>"
     )
 

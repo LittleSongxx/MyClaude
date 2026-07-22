@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+import inspect
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from myclaude.conversation import ConversationManager, Message
-from myclaude.skills.parser import SkillDef, substitute_arguments
+from myclaude.skills.parser import (
+    SkillDef,
+    expand_dynamic_context,
+    substitute_arguments,
+)
 
 if TYPE_CHECKING:
     from myclaude.agent import Agent, AgentEvent
@@ -23,22 +28,34 @@ class SkillExecutor:
         agent: Agent,
         client: LLMClient,
         protocol: str,
+        permission_handler: Callable[[Any], Awaitable[Any] | Any] | None = None,
     ) -> None:
         self.agent = agent
         self.client = client
         self.protocol = protocol
+        self.permission_handler = permission_handler
 
 
     def execute_inline(self, skill: SkillDef, args: str) -> None:
         prompt = substitute_arguments(skill.prompt_body, args)
+        prompt = expand_dynamic_context(prompt, self.agent.work_dir)
         # activate_skill 内部已统一记录 recovery_state，无需在此重复记录。
-        self.agent.activate_skill(skill.name, prompt)
+        activated = self.agent.activate_skill(
+            skill.name,
+            prompt,
+            allowed_tools=skill.allowed_tools,
+            disallowed_tools=skill.disallowed_tools,
+        )
+        conversation = getattr(self.agent, "_current_conversation", None)
+        if activated and conversation is not None:
+            conversation.add_system_reminder(f"# Skill: {skill.name}\n\n{prompt}")
 
 
     async def execute_fork(
         self, skill: SkillDef, args: str
     ) -> str:
         prompt = substitute_arguments(skill.prompt_body, args)
+        prompt = expand_dynamic_context(prompt, self.agent.work_dir)
         if getattr(self.agent, "recovery_state", None) is not None:
             self.agent.recovery_state.record_skill_invocation(
                 skill.name, skill.prompt_body
@@ -55,7 +72,14 @@ class SkillExecutor:
 
         fork_conv.add_user_message(prompt)
 
-        from myclaude.agent import Agent as AgentClass, StreamText, LoopComplete, ErrorEvent
+        from myclaude.agent import (
+            Agent as AgentClass,
+            ErrorEvent,
+            LoopComplete,
+            PermissionRequest,
+            PermissionResponse,
+            StreamText,
+        )
 
         fork_agent = AgentClass(
             client=self.client,
@@ -69,6 +93,13 @@ class SkillExecutor:
             memory_manager=self.agent.memory_manager,
             hook_engine=self.agent.hook_engine,
             run_limits=getattr(self.agent, "run_limits", None),
+            instruction_resolver=getattr(self.agent, "instruction_resolver", None),
+        )
+        fork_agent.activate_skill(
+            skill.name,
+            prompt,
+            allowed_tools=skill.allowed_tools,
+            disallowed_tools=skill.disallowed_tools,
         )
 
         result_parts: list[str] = []
@@ -77,6 +108,16 @@ class SkillExecutor:
                 result_parts.append(event.text)
             elif isinstance(event, ErrorEvent):
                 result_parts.append(f"\n[Error: {event.message}]")
+            elif isinstance(event, PermissionRequest):
+                if self.permission_handler is None:
+                    response = PermissionResponse.DENY
+                else:
+                    response = self.permission_handler(event)
+                    if inspect.isawaitable(response):
+                        response = await response
+                    response = response or PermissionResponse.DENY
+                if not event.future.done():
+                    event.future.set_result(response)
             elif isinstance(event, LoopComplete):
                 break
 

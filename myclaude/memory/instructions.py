@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import os
+import fnmatch
+from dataclasses import dataclass
 from pathlib import Path
+
+import yaml
 
 MAX_INCLUDE_DEPTH = 5
 
@@ -225,3 +229,191 @@ def load_instructions(project_root: str, *, include_project: bool = True) -> str
 
     parts = [f"Contents of {label}:\n\n{content}" for label, content in sources]
     return "\n\n---\n\n".join(parts)
+
+
+@dataclass(frozen=True)
+class ScopedInstruction:
+    path: Path
+    patterns: tuple[str, ...]
+    content: str
+
+
+class InstructionResolver:
+    """Resolve global and path-scoped instructions with one-time lazy loading."""
+
+    def __init__(self, work_dir: str, *, include_project: bool = True) -> None:
+        self.work_dir = Path(work_dir).expanduser().resolve()
+        self.project_root = _find_git_root(self.work_dir) or self.work_dir
+        self.include_project = include_project
+        self._loaded_paths: set[str] = set()
+        self._loaded_labels: list[str] = []
+        self._scoped: list[ScopedInstruction] = []
+        self._pending_labels: list[str] = []
+
+        initial_parts: list[str] = []
+        base = load_instructions(str(self.work_dir), include_project=include_project)
+        if base:
+            initial_parts.append(base)
+        self._mark_initial_instruction_files()
+        if include_project:
+            initial_parts.extend(self._scan_rules())
+        self.initial_content = "\n\n---\n\n".join(initial_parts)
+
+    def _mark_initial_instruction_files(self) -> None:
+        candidates = [
+            Path.home() / ".myclaude" / "MYCLAUDE.md",
+            Path.home() / ".myclaude" / "AGENTS.md",
+        ]
+        if self.include_project:
+            for directory in _project_instruction_dirs(self.work_dir):
+                candidates.extend(
+                    [directory / "MYCLAUDE.md", directory / "AGENTS.md"]
+                )
+            candidates.extend(
+                [
+                    self.work_dir / ".myclaude" / "INSTRUCTIONS.md",
+                    self.work_dir / "MYCLAUDE.local.md",
+                ]
+            )
+        for path in candidates:
+            if path.is_file():
+                self._mark_loaded(path)
+
+    def _scan_rules(self) -> list[str]:
+        initial: list[str] = []
+        rules_dir = self.project_root / ".myclaude" / "rules"
+        if not rules_dir.is_dir():
+            return initial
+        for path in sorted(rules_dir.rglob("*.md")):
+            try:
+                raw = path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            patterns, body = self._parse_rule(raw)
+            content = process_includes(
+                body, path.parent, self.project_root, seen={str(path.resolve())}
+            ).rstrip("\n")
+            rendered = self._render(path, content)
+            if patterns:
+                self._scoped.append(
+                    ScopedInstruction(path=path.resolve(), patterns=patterns, content=rendered)
+                )
+                self._pending_labels.append(self._label(path))
+            else:
+                initial.append(rendered)
+                self._mark_loaded(path)
+        return initial
+
+    @staticmethod
+    def _parse_rule(raw: str) -> tuple[tuple[str, ...], str]:
+        stripped = raw.lstrip()
+        if not stripped.startswith("---"):
+            return (), raw
+        end = stripped.find("---", 3)
+        if end < 0:
+            return (), raw
+        try:
+            meta = yaml.safe_load(stripped[3:end]) or {}
+        except yaml.YAMLError:
+            return (), raw
+        if not isinstance(meta, dict):
+            return (), stripped[end + 3 :].lstrip("\n")
+        paths = meta.get("paths", ())
+        if isinstance(paths, str):
+            patterns = (paths,)
+        elif isinstance(paths, list):
+            patterns = tuple(str(item) for item in paths if str(item).strip())
+        else:
+            patterns = ()
+        return patterns, stripped[end + 3 :].lstrip("\n")
+
+    def on_file_access(self, value: str | Path) -> str:
+        """Return instructions newly made relevant by a file access."""
+        if not self.include_project:
+            return ""
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            path = self.work_dir / path
+        try:
+            resolved = path.resolve()
+            relative = resolved.relative_to(self.project_root).as_posix()
+        except (OSError, ValueError):
+            return ""
+
+        loaded: list[str] = []
+        target_dir = resolved if resolved.is_dir() else resolved.parent
+        try:
+            rel_dir = target_dir.relative_to(self.project_root)
+        except ValueError:
+            return ""
+        current = self.project_root
+        directories = [current]
+        for part in rel_dir.parts:
+            current = current / part
+            directories.append(current)
+        for directory in directories:
+            for name in ("MYCLAUDE.md", "AGENTS.md"):
+                instruction = directory / name
+                if instruction.is_file() and not self._is_loaded(instruction):
+                    rendered = self._read_instruction(instruction)
+                    if rendered:
+                        loaded.append(rendered)
+                    self._mark_loaded(instruction)
+
+        for rule in self._scoped:
+            if self._is_loaded(rule.path):
+                continue
+            if any(self._matches(relative, pattern) for pattern in rule.patterns):
+                loaded.append(rule.content)
+                self._mark_loaded(rule.path)
+                label = self._label(rule.path)
+                if label in self._pending_labels:
+                    self._pending_labels.remove(label)
+        return "\n\n---\n\n".join(loaded)
+
+    def _read_instruction(self, path: Path) -> str:
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except OSError:
+            return ""
+        content = process_includes(
+            raw, path.parent, self.project_root, seen={str(path.resolve())}
+        ).rstrip("\n")
+        return self._render(path, content)
+
+    @staticmethod
+    def _matches(relative: str, pattern: str) -> bool:
+        normalized = pattern.replace("\\", "/").lstrip("./")
+        candidates = {normalized}
+        if "**/" in normalized:
+            candidates.add(normalized.replace("**/", ""))
+        return any(
+            fnmatch.fnmatchcase(relative, candidate)
+            or Path(relative).match(candidate)
+            for candidate in candidates
+        )
+
+    def _label(self, path: Path) -> str:
+        try:
+            return path.resolve().relative_to(self.project_root).as_posix()
+        except ValueError:
+            return str(path.resolve())
+
+    def _render(self, path: Path, content: str) -> str:
+        return f"Contents of {self._label(path)}:\n\n{content}"
+
+    def _is_loaded(self, path: Path) -> bool:
+        return str(path.resolve()) in self._loaded_paths
+
+    def _mark_loaded(self, path: Path) -> None:
+        key = str(path.resolve())
+        if key in self._loaded_paths:
+            return
+        self._loaded_paths.add(key)
+        self._loaded_labels.append(self._label(path))
+
+    def diagnostics(self) -> dict[str, list[str]]:
+        return {
+            "loaded": list(self._loaded_labels),
+            "pending_path_rules": list(self._pending_labels),
+        }

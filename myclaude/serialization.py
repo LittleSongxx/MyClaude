@@ -40,7 +40,7 @@ def build_anthropic_messages(messages: list[Message]) -> list[dict[str, Any]]:
                 content.append({
                     "type": "tool_result",
                     "tool_use_id": tr.tool_use_id,
-                    "content": tr.content,
+                    "content": tr.content_blocks or tr.content,
                     "is_error": tr.is_error,
                 })
             result.append({"role": "user", "content": content})

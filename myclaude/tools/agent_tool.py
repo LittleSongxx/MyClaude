@@ -36,6 +36,10 @@ class AgentToolParams(BaseModel):
             "runs as a one-shot sub-agent that blocks and returns inline."
         ),
     )
+    resume: str | None = Field(
+        default=None,
+        description="Resume a previously launched sub-agent task by task ID.",
+    )
 
 
 PERMISSION_MODE_MAP = {
@@ -73,6 +77,34 @@ class AgentTool(Tool):
     is_concurrency_safe = False
     interrupt_behavior = "cancel"
 
+    def is_call_concurrency_safe(self, arguments: dict[str, Any]) -> bool:
+        if bool(arguments.get("run_in_background")):
+            return True
+        subagent_type = str(arguments.get("subagent_type") or "")
+        definition = self._agent_loader.get(subagent_type) if subagent_type else None
+        if definition is not None and definition.background:
+            return True
+        return subagent_type.casefold() in {"explore", "plan", "verification"}
+
+    def _instructions_for(self, definition: AgentDef) -> str:
+        """Apply project instructions to capable agents, not isolated scouts."""
+        if definition.agent_type.casefold() in {"explore", "plan"}:
+            return definition.system_prompt
+        sections = [self._parent_agent.instructions_content, definition.system_prompt]
+        return "\n\n".join(section for section in sections if section)
+
+    def _instruction_resolver_for(self, definition: AgentDef, work_dir: str) -> Any:
+        if definition.agent_type.casefold() in {"explore", "plan"}:
+            return None
+        if self._parent_agent.instruction_resolver is None:
+            return None
+        from myclaude.memory.instructions import InstructionResolver
+
+        return InstructionResolver(
+            work_dir,
+            include_project=self._parent_agent.instruction_resolver.include_project,
+        )
+
 
     def __init__(
         self,
@@ -100,6 +132,16 @@ class AgentTool(Tool):
 
         if p.team_name:
             return await self._execute_as_teammate(p)
+
+        if p.resume and not p.subagent_type:
+            previous = self._task_manager.get(p.resume)
+            if previous is None:
+                return ToolResult(
+                    output=f"Cannot resume sub-agent: unknown task ID '{p.resume}'",
+                    is_error=True,
+                )
+            if previous.agent_type and previous.agent_type != "fork":
+                p.subagent_type = previous.agent_type
 
         isolation = ""
         if p.subagent_type:
@@ -178,7 +220,7 @@ class AgentTool(Tool):
 
         # 判断是否后台运行
         is_fork = p.subagent_type is None
-        is_background = p.run_in_background or definition.background
+        is_background = p.run_in_background or definition.background or bool(p.resume)
         if is_fork:
             is_background = True
 
@@ -226,12 +268,16 @@ class AgentTool(Tool):
             max_iterations=definition.max_turns,
             permission_checker=checker,
             context_window=self._parent_agent.context_window,
-            instructions_content=definition.system_prompt,
+            instructions_content=self._instructions_for(definition),
             hook_engine=self._parent_agent.hook_engine,
             run_limits=self._parent_agent.run_limits,
+            instruction_resolver=self._instruction_resolver_for(
+                definition, self._parent_agent.work_dir
+            ),
         )
         sub_agent.parent_id = self._parent_agent.agent_id
         sub_agent.trace_id = self._parent_agent.trace_id or self._parent_agent.agent_id
+        sub_agent._agent_type = definition.agent_type
 
         # fork 子 agent 继承父 agent 的替换状态，确保共享的 tool_use_id 做出一致的
         # 决策——这样父子共享的 prompt cache 前缀才能保持字节级一致
@@ -254,12 +300,22 @@ class AgentTool(Tool):
         if is_background:
             if is_fork:
                 sub_agent._fork_conversation = conversation
-            task_id = self._task_manager.launch(
-                agent=sub_agent,
-                task="" if is_fork else p.prompt,
-                name=agent_name,
-                fork_conversation=conversation if is_fork else None,
-            )
+            if p.resume:
+                try:
+                    task_id = self._task_manager.resume(
+                        p.resume,
+                        p.prompt,
+                        agent=sub_agent,
+                    )
+                except (KeyError, RuntimeError, ValueError) as e:
+                    return ToolResult(output=f"Cannot resume sub-agent: {e}", is_error=True)
+            else:
+                task_id = self._task_manager.launch(
+                    agent=sub_agent,
+                    task="" if is_fork else p.prompt,
+                    name=agent_name,
+                    fork_conversation=conversation if is_fork else None,
+                )
             return ToolResult(
                 output=f"Sub-agent launched in background.\n"
                 f"Task ID: {task_id}\n"
@@ -272,9 +328,16 @@ class AgentTool(Tool):
         # 前台同步执行
         try:
             if is_fork:
-                result_text = await sub_agent.run_to_completion("", conversation)
+                result_text = await sub_agent.run_to_completion(
+                    "",
+                    conversation,
+                    permission_handler=self._task_manager.handle_permission_request,
+                )
             else:
-                result_text = await sub_agent.run_to_completion(p.prompt)
+                result_text = await sub_agent.run_to_completion(
+                    p.prompt,
+                    permission_handler=self._task_manager.handle_permission_request,
+                )
         except Exception as e:
             self._trace_manager.complete(trace_node.agent_id, "failed")
             return ToolResult(
@@ -405,7 +468,7 @@ class AgentTool(Tool):
         log.info("[teammate] result_tools=%d names=%s", len(_tm_tools), _tm_tools)
 
         # 6. 创建子 agent 并附加队友专属指令
-        instructions = (definition.system_prompt or "") + TEAMMATE_ADDENDUM
+        instructions = self._instructions_for(definition) + TEAMMATE_ADDENDUM
 
         parent_checker = self._parent_agent.permission_checker
         teammate_mode = restrict_child_mode(
@@ -437,12 +500,14 @@ class AgentTool(Tool):
             instructions_content=instructions,
             hook_engine=self._parent_agent.hook_engine,
             run_limits=self._parent_agent.run_limits,
+            instruction_resolver=self._instruction_resolver_for(definition, wt.path),
         )
         sub_agent.parent_id = self._parent_agent.agent_id
         sub_agent.trace_id = self._parent_agent.trace_id or self._parent_agent.agent_id
         sub_agent.agent_id = agent_id
         sub_agent.team_name = p.team_name
         sub_agent._team_manager = self._team_manager
+        sub_agent._agent_type = definition.agent_type
 
         # 7. 注册名称和成员信息
         AgentNameRegistry.instance().register(teammate_name, agent_id)
@@ -649,12 +714,14 @@ class AgentTool(Tool):
             max_iterations=definition.max_turns,
             permission_checker=checker,
             context_window=self._parent_agent.context_window,
-            instructions_content=definition.system_prompt,
+            instructions_content=self._instructions_for(definition),
             hook_engine=self._parent_agent.hook_engine,
             run_limits=self._parent_agent.run_limits,
+            instruction_resolver=self._instruction_resolver_for(definition, wt.path),
         )
         sub_agent.parent_id = self._parent_agent.agent_id
         sub_agent.trace_id = self._parent_agent.trace_id or self._parent_agent.agent_id
+        sub_agent._agent_type = definition.agent_type
 
         trace_node = self._trace_manager.create(
             agent_type=definition.agent_type,
@@ -664,7 +731,10 @@ class AgentTool(Tool):
         sub_agent.agent_id = trace_node.agent_id
 
         try:
-            result_text = await sub_agent.run_to_completion(task)
+            result_text = await sub_agent.run_to_completion(
+                task,
+                permission_handler=self._task_manager.handle_permission_request,
+            )
         except Exception as e:
             self._trace_manager.complete(trace_node.agent_id, "failed")
             return ToolResult(

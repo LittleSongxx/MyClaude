@@ -1,0 +1,269 @@
+tasks:
+  - &cross_file_config
+    id: cross-file-config-direct
+    category: cross-file-bug
+    tags: [configuration, multi-file]
+    repo: _fixtures/cross-file-config
+    description: Fix a configuration key mismatch across a service boundary.
+    prompt: |
+      The configured request timeout is ignored. Fix the implementation under app/ so
+      tests pass. Do not change tests.
+    test_target: tests/test_service.py
+    diff_whitelist: [app]
+    protected: [tests/test_service.py]
+  - <<: *cross_file_config
+    id: cross-file-config-issue
+    prompt: |
+      Production uses {"timeout_seconds": 5}, but Service.timeout still reports 30.
+      Trace the configuration flow, make the smallest compatible fix, and verify it.
+
+  - &parser_quotes
+    id: parser-quotes-direct
+    category: parser-edge-case
+    tags: [csv, quoted-input]
+    repo: _fixtures/parser-quotes
+    description: Handle delimiters inside quoted CSV fields.
+    prompt: |
+      parse_record mishandles quoted commas. Fix parser.py without changing tests.
+    test_target: tests/test_parser.py
+    diff_whitelist: [parser.py]
+    protected: [tests/test_parser.py]
+  - <<: *parser_quotes
+    id: parser-quotes-issue
+    prompt: |
+      A row such as `42,"Chen, Li",active` is being split into four columns. Diagnose
+      the parser and implement a standards-based fix. Run the focused tests.
+
+  - &cache_expiry
+    id: cache-expiry-direct
+    category: boundary-bug
+    tags: [cache, time]
+    repo: _fixtures/cache-expiry
+    description: Expire cache entries exactly at their deadline.
+    prompt: |
+      Cache entries remain visible at the exact expiry boundary. Fix cache.py and keep
+      its injected-clock API intact.
+    test_target: tests/test_cache.py
+    diff_whitelist: [cache.py]
+    protected: [tests/test_cache.py]
+  - <<: *cache_expiry
+    id: cache-expiry-issue
+    prompt: |
+      Investigate the failing TTL boundary test. Preserve behavior before the deadline
+      and make the smallest correction needed at the deadline.
+
+  - &path_traversal
+    id: path-traversal-direct
+    category: security-fix
+    tags: [filesystem, traversal]
+    repo: _fixtures/path-traversal
+    description: Replace an unsafe string-prefix path containment check.
+    prompt: |
+      resolve_under allows a sibling directory whose name shares the root prefix.
+      Correct the containment check without weakening valid nested paths.
+    test_target: tests/test_storage.py
+    diff_whitelist: [storage.py]
+    protected: [tests/test_storage.py]
+  - <<: *path_traversal
+    id: path-traversal-issue
+    prompt: |
+      Security report: a storage root `/tmp/data` accepts `/tmp/database/secret`.
+      Reproduce from the tests, fix the root cause, and verify normal paths still work.
+
+  - &serialization_none
+    id: serialization-none-direct
+    category: data-integrity
+    tags: [serialization, falsey-values]
+    repo: _fixtures/serialization-none
+    description: Preserve false, zero, and empty strings while omitting None.
+    prompt: |
+      compact_payload is losing valid falsey values. Fix serializer.py; only missing
+      optional values should be omitted.
+    test_target: tests/test_serializer.py
+    diff_whitelist: [serializer.py]
+    protected: [tests/test_serializer.py]
+  - <<: *serialization_none
+    id: serialization-none-issue
+    prompt: |
+      The API payload drops `enabled=false` and `retries=0`. Find why and correct it
+      without sending fields whose value is None.
+
+  - &cli_exit
+    id: cli-exit-code-direct
+    category: cli-contract
+    tags: [exit-code, errors]
+    repo: _fixtures/cli-exit-code
+    description: Return a non-zero usage code for invalid CLI input.
+    prompt: |
+      Invalid CLI values print an error but still return success. Fix cli.py while
+      preserving valid output.
+    test_target: tests/test_cli.py
+    diff_whitelist: [cli.py]
+    protected: [tests/test_cli.py]
+  - <<: *cli_exit
+    id: cli-exit-code-issue
+    prompt: |
+      Automation cannot detect `--count nope` because main() returns 0. Bring the exit
+      status in line with the CLI contract and run its tests.
+
+  - &timezone
+    id: timezone-conversion-direct
+    category: datetime-bug
+    tags: [timezone, dst]
+    repo: _fixtures/timezone-conversion
+    description: Interpret local wall time using an IANA timezone before UTC conversion.
+    prompt: |
+      to_utc treats local wall time as if it were already UTC. Fix scheduling.py using
+      the supplied timezone name and keep the return value timezone-aware.
+    test_target: tests/test_scheduling.py
+    diff_whitelist: [scheduling.py]
+    protected: [tests/test_scheduling.py]
+  - <<: *timezone
+    id: timezone-conversion-issue
+    prompt: |
+      A 09:00 America/New_York meeting is scheduled at 09:00 UTC. Trace the conversion,
+      account for daylight saving time, and verify both winter and summer cases.
+
+  - &stable_dedup
+    id: stable-dedup-direct
+    category: collection-semantics
+    tags: [ordering, deduplication]
+    repo: _fixtures/stable-dedup
+    description: Deduplicate while preserving first-seen order.
+    prompt: |
+      unique_items returns values in an unstable order. Make it preserve first-seen
+      order and support unhashable values.
+    test_target: tests/test_collection.py
+    diff_whitelist: [collection.py]
+    protected: [tests/test_collection.py]
+  - <<: *stable_dedup
+    id: stable-dedup-issue
+    prompt: |
+      The UI list changes order between runs and crashes when an entry is a dict.
+      Correct the deduplication implementation without modifying callers.
+
+  - &async_counter
+    id: async-counter-direct
+    category: concurrency-bug
+    tags: [asyncio, race]
+    repo: _fixtures/async-counter
+    description: Make a read-modify-write increment atomic across await points.
+    prompt: |
+      AsyncCounter loses increments under asyncio.gather. Fix counter.py without
+      removing the asynchronous yield used by the test.
+    test_target: tests/test_counter.py
+    diff_whitelist: [counter.py]
+    protected: [tests/test_counter.py]
+  - <<: *async_counter
+    id: async-counter-issue
+    prompt: |
+      One hundred concurrent increments usually produce 1 instead of 100. Identify the
+      race and add the narrowest synchronization needed.
+
+  - &dependency_migration
+    id: dependency-migration-direct
+    category: api-migration
+    tags: [dependency, keyword-only]
+    repo: _fixtures/dependency-migration
+    description: Adapt a caller to a dependency's new keyword-only API.
+    prompt: |
+      client.py still calls Transport.send using the old positional timeout API. Migrate
+      the caller to the current dependency contract.
+    test_target: tests/test_client.py
+    diff_whitelist: [client.py]
+    protected: [library.py, tests/test_client.py]
+  - <<: *dependency_migration
+    id: dependency-migration-issue
+    prompt: |
+      After upgrading Transport, uploads fail with a positional-argument TypeError.
+      Update our integration rather than changing the vendored library or tests.
+
+  - &circular_import
+    id: circular-import-direct
+    category: import-architecture
+    tags: [typing, circular-import]
+    repo: _fixtures/circular-import
+    description: Remove a runtime circular import while preserving type information.
+    prompt: |
+      Importing app.models fails because app.service and app.models import each other.
+      Fix the runtime dependency without weakening the public API.
+    test_target: tests/test_models.py
+    diff_whitelist: [app]
+    protected: [tests/test_models.py]
+  - <<: *circular_import
+    id: circular-import-issue
+    prompt: |
+      Test collection reports a partially initialized module for User. Untangle the
+      typing/runtime imports and verify labels are unchanged.
+
+  - &log_tail
+    id: log-tail-direct
+    category: long-input
+    tags: [logs, streaming]
+    repo: _fixtures/log-tail
+    description: Select the most recent matching error from a long log.
+    prompt: |
+      latest_error returns the first matching line rather than the last. Fix it without
+      retaining an unnecessary copy of the full input.
+    test_target: tests/test_log_parser.py
+    diff_whitelist: [log_parser.py]
+    protected: [tests/test_log_parser.py]
+  - <<: *log_tail
+    id: log-tail-issue
+    prompt: |
+      Incident summaries cite an obsolete error near the beginning of a large log.
+      Make the parser report the newest ERROR line and handle logs with no errors.
+
+  - &unicode_slug
+    id: unicode-slug-direct
+    category: internationalization
+    tags: [unicode, normalization]
+    repo: _fixtures/unicode-slug
+    description: Produce stable slugs without discarding non-ASCII letters.
+    prompt: |
+      slugify turns Chinese-only names into an empty string. Preserve Unicode letters,
+      normalize separators, and keep existing ASCII behavior.
+    test_target: tests/test_slug.py
+    diff_whitelist: [slug.py]
+    protected: [tests/test_slug.py]
+  - <<: *unicode_slug
+    id: unicode-slug-issue
+    prompt: |
+      Creating a project named `数据 平台` fails because its generated slug is empty.
+      Fix the normalization logic and verify mixed-language names too.
+
+  - &validator_refactor
+    id: validator-refactor-direct
+    category: constrained-refactor
+    tags: [refactor, compatibility]
+    repo: _fixtures/validator-refactor
+    description: Extract duplicated normalization while keeping validation behavior.
+    prompt: |
+      Extract the duplicated email normalization in validators.py into the documented
+      normalize_email helper. Preserve both validation functions and their exceptions.
+    test_target: tests/test_validators.py
+    diff_whitelist: [validators.py]
+    protected: [tests/test_validators.py]
+  - <<: *validator_refactor
+    id: validator-refactor-issue
+    prompt: |
+      The signup and recovery paths normalize email independently and have drifted.
+      Introduce one public normalize_email implementation and route both paths through it.
+
+  - &nested_defaults
+    id: nested-defaults-direct
+    category: mutation-bug
+    tags: [copying, defaults]
+    repo: _fixtures/nested-defaults
+    description: Prevent callers from sharing nested mutable defaults.
+    prompt: |
+      make_settings returns objects that share the same nested headers dictionary. Fix
+      factory.py so each call is independent.
+    test_target: tests/test_factory.py
+    diff_whitelist: [factory.py]
+    protected: [tests/test_factory.py]
+  - <<: *nested_defaults
+    id: nested-defaults-issue
+    prompt: |
+      Adding a header to one client's settings changes every later client. Locate the
+      shared state and fix it without changing the DEFAULT_SETTINGS constant.

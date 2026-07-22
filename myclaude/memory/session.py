@@ -105,7 +105,14 @@ class SessionRecord:
                 records.append(
                     cls(
                         type=RecordType.TOOL_RESULT,
-                        content=tr.content,
+                        content=(
+                            {
+                                "text": tr.content,
+                                "content_blocks": tr.content_blocks,
+                            }
+                            if tr.content_blocks
+                            else tr.content
+                        ),
                         timestamp=now,
                         tool_use_id=tr.tool_use_id,
                         is_error=tr.is_error,
@@ -272,15 +279,21 @@ def records_to_messages(records: list[SessionRecord]) -> list[Message]:
 
     for record in records:
         if record.type == RecordType.TOOL_RESULT:
+            structured = record.content if isinstance(record.content, dict) else {}
             pending_tool_results.append(
                 ToolResultBlock(
                     tool_use_id=record.tool_use_id or "",
                     content=(
                         record.content
                         if isinstance(record.content, str)
-                        else json.dumps(record.content)
+                        else str(structured.get("text", ""))
                     ),
                     is_error=record.is_error,
+                    content_blocks=(
+                        structured.get("content_blocks", [])
+                        if isinstance(structured.get("content_blocks", []), list)
+                        else []
+                    ),
                 )
             )
             continue

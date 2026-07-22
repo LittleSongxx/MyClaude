@@ -12,16 +12,6 @@ async def handle_clear(ctx: CommandContext) -> None:
         new_session = ctx.session_manager.create()
         ctx.config["set_session"](new_session)
 
-        # 用新 session ID 重建 file history
-        if ctx.agent:
-            from myclaude.filehistory import FileHistory
-
-            file_history = FileHistory(ctx.agent._work_dir, new_session.session_id)
-            ctx.agent.file_history = file_history
-            for tool in ctx.agent.registry.list_tools():
-                if hasattr(tool, "file_history"):
-                    tool.file_history = file_history
-
     ctx.config["set_conversation"](ConversationManager())
 
     if ctx.agent:

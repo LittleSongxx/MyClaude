@@ -14,6 +14,7 @@ class ToolRegistry:
         self._disabled: set[str] = set()
         self._discovered: set[str] = set()
         self._work_dir: str | None = None
+        self._native_deferred_loading = False
 
     def register(self, tool: Tool) -> None:
         if self._work_dir is not None:
@@ -24,6 +25,13 @@ class ToolRegistry:
         self._work_dir = work_dir
         for tool in self._tools.values():
             tool.work_dir = work_dir
+
+    def set_native_deferred_loading(self, enabled: bool) -> None:
+        self._native_deferred_loading = enabled
+
+    @property
+    def native_deferred_loading(self) -> bool:
+        return self._native_deferred_loading
 
     def get(self, name: str) -> Tool | None:
         return self._tools.get(name)
@@ -130,7 +138,12 @@ class ToolRegistry:
         for name, tool in self._tools.items():
             if name in self._disabled:
                 continue
-            if getattr(tool, "should_defer", False) and name not in self._discovered:
+            is_deferred = getattr(tool, "should_defer", False)
+            if (
+                is_deferred
+                and name not in self._discovered
+                and not self._native_deferred_loading
+            ):
                 continue
             base = tool.get_schema()
             if protocol in ("openai", "openai-compat"):
@@ -141,12 +154,20 @@ class ToolRegistry:
                     "parameters": base["input_schema"],
                 })
             else:
+                if (
+                    self._native_deferred_loading
+                    and is_deferred
+                    and name not in self._discovered
+                ):
+                    base = {**base, "defer_loading": True}
                 schemas.append(base)
         return schemas
 
 
 def create_default_registry(file_cache: FileCache | None = None, file_history: Any = None) -> ToolRegistry:
+    from myclaude.diagnostics import LSPDiagnostics
     from myclaude.tools.bash import Bash
+    from myclaude.tools.bash_tasks import BashOutput, BashStop
     from myclaude.tools.delete_file import DeleteFile
     from myclaude.tools.edit_file import EditFile
     from myclaude.tools.file_state_cache import FileStateCache
@@ -154,15 +175,20 @@ def create_default_registry(file_cache: FileCache | None = None, file_history: A
     from myclaude.tools.grep import Grep
     from myclaude.tools.read_file import ReadFile
     from myclaude.tools.write_file import WriteFile
+    from myclaude.tools.process_manager import ProcessManager
 
     file_state_cache = FileStateCache()
+    diagnostics = LSPDiagnostics()
 
     registry = ToolRegistry()
+    process_manager = ProcessManager()
     registry.register(ReadFile(file_cache=file_cache, file_state_cache=file_state_cache))
-    registry.register(WriteFile(file_cache=file_cache, file_history=file_history, file_state_cache=file_state_cache))
-    registry.register(EditFile(file_cache=file_cache, file_history=file_history, file_state_cache=file_state_cache))
+    registry.register(WriteFile(file_cache=file_cache, file_history=file_history, file_state_cache=file_state_cache, diagnostics=diagnostics))
+    registry.register(EditFile(file_cache=file_cache, file_history=file_history, file_state_cache=file_state_cache, diagnostics=diagnostics))
     registry.register(DeleteFile(file_cache=file_cache, file_history=file_history, file_state_cache=file_state_cache))
-    registry.register(Bash())
+    registry.register(Bash(process_manager))
+    registry.register(BashOutput(process_manager))
+    registry.register(BashStop(process_manager))
     registry.register(Glob())
     registry.register(Grep())
     return registry

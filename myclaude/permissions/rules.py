@@ -13,6 +13,9 @@ from myclaude.tools.file_io import atomic_write_text, locked_path
 Effect = Literal["allow", "deny", "ask"]
 MatchMode = Literal["glob", "literal"]
 
+_EFFECT_PRIORITY: dict[Effect, int] = {"allow": 1, "ask": 2, "deny": 3}
+_SHELL_SEPARATORS = ("&&", "||", "|&", ";", "|", "&", "\n", "\r")
+
 _RULE_RE = re.compile(r"^(\w+)\((.+)\)$", re.DOTALL)
 
 _CONTENT_FIELDS: dict[str, str] = {
@@ -49,6 +52,72 @@ class Rule:
         if self.match == "literal":
             return content == self.pattern
         return fnmatch(content, self.pattern)
+
+
+def _split_bash_command(command: str) -> tuple[list[str], bool]:
+    """Split top-level shell commands without treating quoted operators as syntax.
+
+    The boolean reports whether the expression is simple enough for an allow
+    rule to authorize. Command/process substitution and grouping constructs
+    are intentionally treated as ambiguous; deny and ask rules are still
+    checked, but an allow falls back to the normal permission prompt.
+    """
+    segments: list[str] = []
+    current: list[str] = []
+    quote = ""
+    escaped = False
+    unambiguous = True
+    index = 0
+
+    while index < len(command):
+        char = command[index]
+        if escaped:
+            current.append(char)
+            escaped = False
+            index += 1
+            continue
+        if char == "\\" and quote != "'":
+            current.append(char)
+            escaped = True
+            index += 1
+            continue
+        if quote:
+            current.append(char)
+            if char == quote:
+                quote = ""
+            index += 1
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            current.append(char)
+            index += 1
+            continue
+
+        if char == "`" or command.startswith("$(", index):
+            unambiguous = False
+        if char in {"(", ")", "{", "}"}:
+            unambiguous = False
+
+        separator = next(
+            (item for item in _SHELL_SEPARATORS if command.startswith(item, index)),
+            "",
+        )
+        if separator:
+            part = "".join(current).strip()
+            if part:
+                segments.append(part)
+            current = []
+            index += len(separator)
+            continue
+        current.append(char)
+        index += 1
+
+    part = "".join(current).strip()
+    if part:
+        segments.append(part)
+    if quote or escaped or not segments:
+        unambiguous = False
+    return segments, unambiguous
 
 
 def parse_rule(raw: str, effect: Effect) -> Rule:
@@ -135,11 +204,48 @@ class RuleEngine:
         return tiers
 
 
+    def _all_rules(self) -> list[Rule]:
+        # Reverse each source so a recently appended rule is inspected first,
+        # while effect priority remains global across every settings scope.
+        return [rule for tier in self._load_tiers() for rule in reversed(tier)]
+
+    @staticmethod
+    def _resolve_matching(
+        rules: list[Rule], tool_name: str, content: str
+    ) -> Effect | None:
+        effects = [
+            rule.effect for rule in rules if rule.matches(tool_name, content)
+        ]
+        if not effects:
+            return None
+        return max(effects, key=_EFFECT_PRIORITY.__getitem__)
+
+
     def evaluate(self, tool_name: str, content: str) -> Effect | None:
-        for rules in self._load_tiers():
-            for rule in reversed(rules):
-                if rule.matches(tool_name, content):
-                    return rule.effect
+        rules = self._all_rules()
+        whole_result = self._resolve_matching(rules, tool_name, content)
+        if tool_name != "Bash":
+            return whole_result
+
+        segments, unambiguous = _split_bash_command(content)
+        segment_results = [
+            self._resolve_matching(rules, tool_name, segment) for segment in segments
+        ]
+
+        # A deny or ask on either the complete expression or any executable
+        # component always wins. This also preserves conservative broad rules.
+        observed = [whole_result, *segment_results]
+        if "deny" in observed:
+            return "deny"
+        if "ask" in observed:
+            return "ask"
+
+        # A compound expression is allowed only when every command is covered.
+        # Ambiguous shell syntax must go through the regular permission flow.
+        if unambiguous and segment_results and all(
+            result == "allow" for result in segment_results
+        ):
+            return "allow"
         return None
 
 

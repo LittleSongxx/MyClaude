@@ -18,13 +18,16 @@ from pathlib import Path
 from typing import Protocol
 
 from myclaude.eval.oracle import (
+    OracleResult,
     ScoreCard,
     check_diff_whitelist,
     check_no_conflict_markers,
     check_protected_unchanged,
     run_pytest,
+    run_verification_command,
     snapshot_hashes,
 )
+from myclaude.eval.metrics import TrajectoryMetrics, compute_metrics
 from myclaude.eval.task import EvalTask
 from myclaude.eval.trace import TraceWriter
 
@@ -81,6 +84,8 @@ def _score(task: EvalTask, work_dir: Path, trial: int, baseline: dict[str, str])
 
     # 测试永远跑：它是"任务是否真正完成"的最终裁判。
     card.add(run_pytest(work_dir, task.test_target))
+    for command in task.verification_commands:
+        card.add(run_verification_command(work_dir, command))
     return card
 
 
@@ -111,6 +116,9 @@ async def run_trial(
             trace.emit("solver_error", error_type=type(exc).__name__, success=False)
 
         card = _score(task, work_dir, trial, baseline)
+        if solver_error is not None:
+            card.add(OracleResult("solver", False, solver_error))
+        card.metrics = compute_metrics(trace.events)
         trace.emit(
             "task_end",
             purpose="eval",
@@ -139,9 +147,70 @@ class TaskReport:
     def success_rate(self) -> float:
         return self.successes / self.trials if self.trials else 0.0
 
+    @property
+    def pass_at_k(self) -> bool:
+        """Whether at least one of the k trials succeeded."""
+        return self.successes > 0
+
+    @property
+    def pass_all_k(self) -> bool:
+        """Whether all k trials succeeded, measuring repeatability."""
+        return self.trials > 0 and self.successes == self.trials
+
+    @property
+    def aggregate_metrics(self) -> TrajectoryMetrics:
+        total = TrajectoryMetrics()
+        for card in self.cards:
+            metrics = card.metrics
+            for field_name in (
+                "llm_calls", "tool_calls", "tool_errors", "input_tokens",
+                "output_tokens", "cache_read_tokens", "cache_write_tokens",
+                "total_duration_ms", "repeated_file_reads",
+                "repeated_failed_commands",
+            ):
+                setattr(
+                    total,
+                    field_name,
+                    getattr(total, field_name) + getattr(metrics, field_name),
+                )
+            for name, count in metrics.tools_by_name.items():
+                total.tools_by_name[name] = total.tools_by_name.get(name, 0) + count
+        return total
+
     def summary(self) -> str:
         # 同时展示成功数与 trial 数——不把一次偶然成功包装成稳定能力。
         return f"{self.task_id}: {self.successes}/{self.trials} passed ({self.success_rate:.0%})"
+
+
+@dataclass
+class SuiteReport:
+    reports: list[TaskReport] = field(default_factory=list)
+
+    @property
+    def total_trials(self) -> int:
+        return sum(report.trials for report in self.reports)
+
+    @property
+    def total_successes(self) -> int:
+        return sum(report.successes for report in self.reports)
+
+    @property
+    def trial_success_rate(self) -> float:
+        return self.total_successes / self.total_trials if self.total_trials else 0.0
+
+    @property
+    def pass_at_k_rate(self) -> float:
+        return (
+            sum(report.pass_at_k for report in self.reports) / len(self.reports)
+            if self.reports else 0.0
+        )
+
+    @property
+    def pass_all_k_rate(self) -> float:
+        return (
+            sum(report.pass_all_k for report in self.reports) / len(self.reports)
+            if self.reports else 0.0
+        )
 
 
 async def run_task(
@@ -157,3 +226,14 @@ async def run_task(
         card = await run_trial(task, solver, trial, out_dir=out_dir)
         report.cards.append(card)
     return report
+
+
+async def run_suite(
+    tasks: list[EvalTask], solver: Solver, *, trials: int = 3, out_dir: Path
+) -> SuiteReport:
+    suite = SuiteReport()
+    for task in tasks:
+        suite.reports.append(
+            await run_task(task, solver, trials=trials, out_dir=out_dir)
+        )
+    return suite

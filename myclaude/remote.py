@@ -318,6 +318,7 @@ class RemoteServer:
         self.trace_manager = features.trace_manager
         self.team_manager = features.team_manager
         self.agent_loader = features.agent_loader
+        self.task_manager.set_permission_handler(self._forward_permission_request)
 
         self.agent.session_id = self.session_id
 
@@ -462,17 +463,7 @@ class RemoteServer:
                     })
 
                 elif isinstance(event, PermissionRequest):
-                    # 生成唯一 ID，等待 Web 端回复
-                    perm_id = f"perm_{time.time_ns()}"
-                    self._pending_perms[perm_id] = event.future
-                    await self._broadcast({
-                        "type": "permission_request",
-                        "data": {
-                            "id": perm_id,
-                            "toolName": event.tool_name,
-                            "description": event.description,
-                        },
-                    })
+                    await self.task_manager.handle_permission_request(event)
 
                 elif isinstance(event, AskUserEvent):
                     ask_id = f"ask_{time.time_ns()}"
@@ -723,6 +714,14 @@ class RemoteServer:
         self.session_id = session.session_id
         if self.agent is not None:
             self.agent.session_id = session.session_id
+            from myclaude.filehistory import FileHistory
+
+            base_dir = self._assembler.work_dir if self._assembler else self.agent.work_dir
+            file_history = FileHistory(base_dir, session.session_id)
+            self.agent.file_history = file_history
+            for tool in self.agent.registry.list_tools():
+                if hasattr(tool, "file_history"):
+                    tool.file_history = file_history
 
     def _set_conversation(self, conversation: ConversationManager) -> None:
         self.conversation = conversation
@@ -822,6 +821,23 @@ class RemoteServer:
     # ------------------------------------------------------------------
     # 权限响应处理
     # ------------------------------------------------------------------
+
+    async def _forward_permission_request(
+        self, event: PermissionRequest
+    ) -> PermissionResponse:
+        perm_id = f"perm_{time.time_ns()}"
+        self._pending_perms[perm_id] = event.future
+        await self._broadcast(
+            {
+                "type": "permission_request",
+                "data": {
+                    "id": perm_id,
+                    "toolName": event.tool_name,
+                    "description": event.description,
+                },
+            }
+        )
+        return await event.future
 
     def _handle_permission_response(self, data: dict[str, Any]) -> None:
         """处理来自 Web UI 的权限回复。"""

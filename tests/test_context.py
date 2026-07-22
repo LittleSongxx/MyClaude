@@ -105,8 +105,9 @@ class TestMakePersistedPreview:
         preview = make_persisted_preview(content, tmp_path / "test.txt")
         lines = preview.split("\n")
         preview_line = [l for l in lines if l.startswith("aaa")]
-        assert len(preview_line) == 1
-        assert len(preview_line[0]) == 2_000
+        assert len(preview_line) == 2
+        assert all(len(line) == 2_000 for line in preview_line)
+        assert "预览（末尾 2KB）" in preview
 
 # ---------------------------------------------------------------------------
 # apply_tool_result_budget

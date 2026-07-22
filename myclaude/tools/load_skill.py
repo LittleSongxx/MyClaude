@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
-from myclaude.tools.base import Tool, ToolResult
+from myclaude.tools.base import PermissionScope, Tool, ToolCategory, ToolResult
 
 if TYPE_CHECKING:
     from myclaude.agent import Agent
@@ -13,6 +13,9 @@ if TYPE_CHECKING:
 
 class LoadSkillParams(BaseModel):
     name: str = Field(description="The name of the skill to load")
+    arguments: str = Field(
+        default="", description="Optional arguments substituted into the skill body"
+    )
 
 
 class LoadSkill(Tool):
@@ -38,6 +41,35 @@ class LoadSkill(Tool):
     def set_agent(self, agent: Agent) -> None:
         self._agent = agent
 
+    def _dynamic_commands(self, arguments: dict[str, Any]) -> list[str]:
+        if self._loader is None:
+            return []
+        skill = self._loader.get(str(arguments.get("name", "")))
+        if skill is None:
+            return []
+        from myclaude.skills.parser import dynamic_context_commands
+
+        return dynamic_context_commands(skill.prompt_body)
+
+    def permission_category(self, arguments: dict[str, Any]) -> ToolCategory:
+        return "command" if self._dynamic_commands(arguments) else "read"
+
+    def permission_rule_name(self, arguments: dict[str, Any]) -> str:
+        return "Bash" if self._dynamic_commands(arguments) else self.name
+
+    def permission_scope(self, arguments: dict[str, Any]) -> PermissionScope:
+        commands = self._dynamic_commands(arguments)
+        if not commands:
+            return super().permission_scope(arguments)
+        content = " && ".join(commands)
+        return PermissionScope(
+            content=content,
+            description=(
+                f"Load skill '{arguments.get('name', '')}' and run dynamic context: "
+                + content
+            ),
+        )
+
 
     async def execute(self, params: BaseModel) -> ToolResult:
         assert isinstance(params, LoadSkillParams)
@@ -56,7 +88,30 @@ class LoadSkill(Tool):
                 is_error=True,
             )
 
-        self._agent.activate_skill(skill.name, skill.prompt_body)
+        if skill.disable_model_invocation:
+            return ToolResult(
+                output=(
+                    f"Error: skill '{skill.name}' is user-invocable only and cannot "
+                    "be loaded by the model"
+                ),
+                is_error=True,
+            )
+
+        from myclaude.skills.parser import expand_dynamic_context, substitute_arguments
+
+        prompt = substitute_arguments(skill.prompt_body, params.arguments)
+        prompt = expand_dynamic_context(prompt, self._agent.work_dir)
+        if skill.allowed_tools or skill.disallowed_tools:
+            activated = self._agent.activate_skill(
+                skill.name,
+                prompt,
+                allowed_tools=skill.allowed_tools,
+                disallowed_tools=skill.disallowed_tools,
+            )
+        else:
+            activated = self._agent.activate_skill(skill.name, prompt)
 
         header = f"# Skill: {skill.name}\n\n"
-        return ToolResult(output=header + skill.prompt_body)
+        if activated is False:
+            return ToolResult(output=f"Skill '{skill.name}' is already active; reused it.")
+        return ToolResult(output=header + prompt)

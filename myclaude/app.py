@@ -772,6 +772,7 @@ class MyClaudeApp(App):
         self.agent_loader = features.agent_loader
         self.task_manager = features.task_manager
         self.trace_manager = features.trace_manager
+        self.task_manager.set_permission_handler(self._handle_permission_request)
         self.team_manager = features.team_manager
         install_skill_tool = features.install_skill_tool
         self._install_skill_tool = install_skill_tool
@@ -790,6 +791,7 @@ class MyClaudeApp(App):
             agent=self.agent,
             client=self.client,
             protocol=provider.protocol,
+            permission_handler=self.task_manager.handle_permission_request,
         )
 
         register_skill_commands(
@@ -937,6 +939,14 @@ class MyClaudeApp(App):
         self.session = session
         if self.agent:
             self.agent.session_id = session.session_id
+            from myclaude.filehistory import FileHistory
+
+            base_dir = self._assembler.work_dir if self._assembler else self.agent.work_dir
+            self.file_history = FileHistory(base_dir, session.session_id)
+            self.agent.file_history = self.file_history
+            for tool in self.agent.registry.list_tools():
+                if hasattr(tool, "file_history"):
+                    tool.file_history = self.file_history
 
     def _persist_compact_boundary(self, notification: CompactNotification) -> None:
         """Layer-2 compact 后写入 compact_boundary 记录。
@@ -1314,7 +1324,7 @@ class MyClaudeApp(App):
                     self.call_after_refresh(chat.scroll_end, animate=False)
 
                 elif isinstance(event, PermissionRequest):
-                    await self._handle_permission_request(event)
+                    await self.task_manager.handle_permission_request(event)
 
                 elif isinstance(event, AskUserEvent):
                     await self._handle_askuser(event)
@@ -1456,7 +1466,7 @@ class MyClaudeApp(App):
                 f"{status_icon} 后台任务完成: [{task.id}] {task.name} — {task.status}"
             )
 
-            if hasattr(self, 'team_manager'):
+            if hasattr(self, 'team_manager') and task.agent is not None:
                 self.team_manager.on_teammate_completed(task.agent.agent_id)
 
         self._agent_task = asyncio.create_task(

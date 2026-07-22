@@ -7,7 +7,7 @@ from myclaude.agent import Agent
 from myclaude.client import LLMClient, create_client
 from myclaude.config import ProviderConfig, SandboxAppConfig, WorktreeConfig
 from myclaude.hooks import HookEngine
-from myclaude.memory import MemoryManager, load_instructions, make_recall_fn
+from myclaude.memory import MemoryManager, make_recall_fn
 from myclaude.permissions import (
     DangerousCommandDetector,
     PathSandbox,
@@ -150,6 +150,11 @@ def build_core_runtime(
         if memory_manager is not None
         else None
     )
+    from myclaude.memory.instructions import InstructionResolver
+
+    instruction_resolver = InstructionResolver(
+        root, include_project=workspace_trusted
+    )
     agent = Agent(
         client=client,
         registry=registry,
@@ -157,12 +162,20 @@ def build_core_runtime(
         work_dir=root,
         permission_checker=checker,
         context_window=provider.get_context_window(),
-        instructions_content=load_instructions(root, include_project=workspace_trusted),
+        instructions_content=instruction_resolver.initial_content,
+        instruction_resolver=instruction_resolver,
         memory_manager=memory_manager,
         hook_engine=hook_engine,
         run_limits=run_limits,
         recall_fn=recall_fn,
     )
+    from myclaude.filehistory import FileHistory
+
+    file_history = FileHistory(root, agent.agent_id)
+    agent.file_history = file_history
+    for tool in registry.list_tools():
+        if hasattr(tool, "file_history"):
+            tool.file_history = file_history
 
     worktree_manager: WorktreeManager | None = None
     if worktree_enabled:

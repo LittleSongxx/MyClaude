@@ -420,6 +420,41 @@ class MemoryManager:
                     continue
         return "\n".join(entries)
 
+    def _current_memory_indexes(self) -> str:
+        sections: list[str] = []
+        for label, directory in (
+            ("User", self._user_mem_dir),
+            ("Project", self._mem_dir),
+        ):
+            if not directory:
+                continue
+            path = Path(directory) / ENTRYPOINT_NAME
+            try:
+                content = truncate_entrypoint_content(
+                    path.read_text(encoding="utf-8")
+                )
+            except OSError:
+                content = "(empty)"
+            sections.append(f"### {label} {ENTRYPOINT_NAME}\n{content or '(empty)'}")
+        return "\n\n".join(sections)
+
+    def state_token(self) -> tuple[tuple[str, int, int], ...]:
+        """Return a cheap fingerprint used to detect explicit memory edits."""
+        rows: list[tuple[str, int, int]] = []
+        for directory in (self._user_mem_dir, self._mem_dir):
+            if not directory:
+                continue
+            path = Path(directory)
+            if not path.is_dir():
+                continue
+            for file_path in sorted(path.glob("*.md")):
+                try:
+                    stat = file_path.stat()
+                except OSError:
+                    continue
+                rows.append((str(file_path), stat.st_mtime_ns, stat.st_size))
+        return tuple(rows)
+
     async def extract(
         self,
         client: Any,
@@ -452,6 +487,7 @@ class MemoryManager:
 
         # 扫描已有记忆做去重
         manifest = self._scan_existing_memories()
+        indexes = self._current_memory_indexes()
         manifest_section = ""
         if manifest:
             manifest_section = (
@@ -477,6 +513,7 @@ class MemoryManager:
             f"- Ephemeral task details\n"
             f"- Passwords, API keys, tokens, private keys, or other secrets\n\n"
             f"If nothing is worth saving, output NONE.{manifest_section}\n\n"
+            f"## Current memory indexes\n\n{indexes or '(empty)'}\n\n"
             f"Conversation:\n{conversation_text}"
         )
 

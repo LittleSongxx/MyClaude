@@ -82,3 +82,14 @@ def resolve_model_capabilities(model: str, protocol: str) -> ModelCapabilities:
         default_max_output_tokens=8192,
         thinking_mode="enabled" if protocol == "anthropic" else "none",
     )
+
+
+def supports_anthropic_tool_search(model: str) -> bool:
+    """Return whether Anthropic documents native tool search for this model."""
+    normalized = model.casefold()
+    if re.search(r"claude-(?:fable|mythos)-5(?:-|$)", normalized):
+        return True
+    match = re.search(
+        r"claude-(?:opus|sonnet|haiku)-4[-.]?(\d+)(?:-|$)", normalized
+    )
+    return match is not None and int(match.group(1)) >= 5

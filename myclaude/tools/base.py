@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
@@ -29,6 +29,14 @@ class PermissionScope:
 class ToolResult:
     output: str
     is_error: bool = False
+    artifact_path: str = ""
+    mime_type: str = "text/plain"
+    truncated: bool = False
+    total_bytes: int = 0
+    total_lines: int | None = None
+    next_offset: int | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+    content_blocks: list[dict[str, Any]] = field(default_factory=list)
 
 
 class Tool(ABC):
@@ -45,6 +53,22 @@ class Tool(ABC):
     @property
     def is_read_only(self) -> bool:
         return self.category == "read"
+
+    def is_call_concurrency_safe(self, arguments: dict[str, Any]) -> bool:
+        """Return whether this particular invocation may run beside peer calls.
+
+        Most tools have a static answer. Tools whose safety depends on arguments
+        (for example, launching a background agent) can override this method.
+        """
+        return self.is_concurrency_safe
+
+    def permission_category(self, arguments: dict[str, Any]) -> ToolCategory:
+        """Return the permission class for this invocation."""
+        return self.category
+
+    def permission_rule_name(self, arguments: dict[str, Any]) -> str:
+        """Return the rule namespace used for this invocation."""
+        return self.name
 
 
     def get_schema(self) -> dict[str, Any]:

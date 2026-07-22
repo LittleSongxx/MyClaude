@@ -55,20 +55,21 @@ class SkillLoader:
                     skill.source_path = entry
                     results.append(skill)
                 elif entry.is_dir():
-                    # 优先尝试 skill.yaml + prompt.md 格式
-                    skill_yaml = entry / "skill.yaml"
-                    if skill_yaml.is_file():
-                        skill = self._parse_skill_yaml(skill_yaml, entry)
-                        if skill is not None:
-                            results.append(skill)
-                            continue
-                    # 回退到 SKILL.md 格式
+                    # Agent Skills standard is the primary directory format.
                     skill_md = entry / "SKILL.md"
                     if skill_md.is_file():
                         skill = parse_skill_file(skill_md)
                         skill.source_path = skill_md
                         skill.is_directory = True
                         results.append(skill)
+                        continue
+                    # Legacy MyClaude format remains supported as a fallback.
+                    skill_yaml = entry / "skill.yaml"
+                    if skill_yaml.is_file():
+                        skill = self._parse_skill_yaml(skill_yaml, entry)
+                        if skill is not None:
+                            results.append(skill)
+                            continue
             except SkillParseError as e:
                 log.warning("Skipping %s skill '%s': %s", source, entry.name, e)
 
@@ -116,15 +117,29 @@ class SkillLoader:
         if mode not in ("inline", "fork"):
             mode = "inline"
 
+        context = str(meta.get("context", "full"))
+        if context == "fork":
+            mode = "fork"
+            context = "none"
+        from myclaude.skills.parser import _tool_list
+
         return SkillDef(
             name=name,
             description=description,
             prompt_body=prompt_body,
             mode=mode,
             model=meta.get("model"),
-            context=meta.get("context", "full"),
+            context=context,
             source_path=prompt_md if prompt_md.is_file() else yaml_path,
             is_directory=True,
+            allowed_tools=_tool_list(meta.get("allowed-tools", meta.get("allowedTools", []))),
+            disallowed_tools=_tool_list(
+                meta.get("disallowed-tools", meta.get("disallowedTools", []))
+            ),
+            disable_model_invocation=bool(meta.get("disable-model-invocation", False)),
+            user_invocable=bool(meta.get("user-invocable", True)),
+            argument_hint=str(meta.get("argument-hint", "")),
+            agent=str(meta.get("agent", "")),
         )
 
     def get(self, name: str) -> SkillDef | None:
@@ -148,8 +163,30 @@ class SkillLoader:
 
         return skill
 
-    def get_catalog(self) -> list[tuple[str, str]]:
-        return [(s.name, s.description) for s in self._skills.values()]
+    def get_catalog(
+        self, *, for_model: bool = True, max_chars: int = 16_000
+    ) -> list[tuple[str, str]]:
+        catalog: list[tuple[str, str]] = []
+        used = 0
+        for skill in self._skills.values():
+            if for_model and skill.disable_model_invocation:
+                continue
+            if not for_model and not skill.user_invocable:
+                continue
+            description = skill.description.strip()
+            size = len(skill.name) + len(description) + 4
+            if used + size > max_chars:
+                remaining = max_chars - used - len(skill.name) - 4
+                if catalog or remaining <= 0:
+                    break
+                description = description[:remaining]
+                size = len(skill.name) + len(description) + 4
+            catalog.append((skill.name, description))
+            used += size
+        return catalog
+
+    def get_user_catalog(self) -> list[tuple[str, str]]:
+        return self.get_catalog(for_model=False)
 
     def needs_reload(self) -> bool:
         """skill 目录的 modtime 变化说明有新增或删除的 skill。"""

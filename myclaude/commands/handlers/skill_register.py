@@ -28,7 +28,7 @@ def register_skill_commands(
             }
         _REGISTERED_SKILL_NAMES.discard(name)
 
-    for skill_name, skill_desc in loader.get_catalog():
+    for skill_name, skill_desc in loader.get_user_catalog():
         if registry.find(skill_name) is not None:
             continue
 

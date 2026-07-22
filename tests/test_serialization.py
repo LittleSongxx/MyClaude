@@ -9,10 +9,13 @@ from __future__ import annotations
 
 from myclaude.conversation import (
     ConversationManager,
+    Message,
     ThinkingBlock,
     ToolResultBlock,
     ToolUseBlock,
 )
+from myclaude.client import _mark_last_tool_for_cache
+from myclaude.memory.session import SessionRecord, records_to_messages
 from myclaude.provider_state import ProviderContinuationState
 from myclaude.serialization import (
     build_anthropic_messages,
@@ -44,6 +47,65 @@ def test_anthropic_tool_results_become_user_blocks():
     assert msgs[0]["role"] == "user"
     assert msgs[0]["content"][0]["type"] == "tool_result"
     assert msgs[0]["content"][0]["tool_use_id"] == "tu-1"
+
+
+def test_anthropic_preserves_tool_reference_content_blocks():
+    conv = ConversationManager()
+    conv.add_tool_results_message(
+        [
+            ToolResultBlock(
+                tool_use_id="tu-search",
+                content="Found DeferredAlpha",
+                content_blocks=[
+                    {"type": "tool_reference", "tool_name": "DeferredAlpha"}
+                ],
+            )
+        ]
+    )
+
+    msgs = build_anthropic_messages(conv.get_messages())
+
+    assert msgs[0]["content"][0]["content"] == [
+        {"type": "tool_reference", "tool_name": "DeferredAlpha"}
+    ]
+
+
+def test_tool_reference_roundtrips_through_session_records():
+    original = Message(
+        role="user",
+        content="",
+        tool_results=[
+            ToolResultBlock(
+                tool_use_id="tu-search",
+                content="Found DeferredAlpha",
+                content_blocks=[
+                    {"type": "tool_reference", "tool_name": "DeferredAlpha"}
+                ],
+            )
+        ],
+    )
+
+    restored = records_to_messages(SessionRecord.from_message(original))
+
+    assert restored[0].tool_results[0].content_blocks == [
+        {"type": "tool_reference", "tool_name": "DeferredAlpha"}
+    ]
+
+
+def test_prompt_cache_marker_never_attaches_to_deferred_tool():
+    tools = [
+        {"name": "ToolSearch", "input_schema": {"type": "object"}},
+        {
+            "name": "DeferredAlpha",
+            "input_schema": {"type": "object"},
+            "defer_loading": True,
+        },
+    ]
+
+    marked = _mark_last_tool_for_cache(tools)
+
+    assert marked[0]["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in marked[1]
 
 
 def test_anthropic_merges_system_reminder_into_prev_user():

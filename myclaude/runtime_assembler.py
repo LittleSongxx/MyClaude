@@ -14,6 +14,7 @@ from myclaude.config import (
 )
 from myclaude.hooks import HookEngine
 from myclaude.mcp import ConnectResult, MCPManager
+from myclaude.model_capabilities import supports_anthropic_tool_search
 from myclaude.permissions import PermissionMode
 from myclaude.runtime import CoreRuntime, build_core_runtime
 from myclaude.skills.loader import SkillLoader
@@ -173,6 +174,11 @@ class RuntimeAssembler:
         trace_manager: TraceManager | None = None,
     ) -> StandardFeatures:
         registry = core.registry
+        registry.set_native_deferred_loading(
+            self.provider.protocol == "anthropic"
+            and "api.anthropic.com" in self.provider.base_url.casefold()
+            and supports_anthropic_tool_search(self.provider.model)
+        )
         registry.register(ToolSearchTool(registry, protocol=self.provider.protocol))
 
         skill_loader = SkillLoader(
@@ -202,6 +208,9 @@ class RuntimeAssembler:
 
         task_manager = task_manager or TaskManager()
         trace_manager = trace_manager or TraceManager()
+        task_manager.configure_storage(self.work_dir)
+        trace_manager.configure_storage(self.work_dir)
+        task_manager.set_trace_manager(trace_manager)
         agent_loader = AgentLoader(
             self.work_dir,
             enable_verification=enable_verification_agent,

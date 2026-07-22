@@ -10,7 +10,7 @@ if TYPE_CHECKING:
 
 
 def _format_elapsed(start: float, end: float | None) -> str:
-    elapsed = (end or time.monotonic()) - start
+    elapsed = (end or time.time()) - start
     if elapsed >= 60:
         return f"{elapsed / 60:.1f}m"
     return f"{elapsed:.0f}s"

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import fnmatch
+import inspect
 import logging
 import time
 import uuid
@@ -63,7 +65,7 @@ from myclaude.usage import RunLimits, UsageSnapshot
 
 log = logging.getLogger(__name__)
 
-MEMORY_EXTRACTION_INTERVAL = 1
+MEMORY_EXTRACTION_INTERVAL = 5
 MAX_TOKENS_CEILING = 64000
 MAX_OUTPUT_TOKENS_RECOVERIES = 3
 MAX_REQUEST_RETRIES = 3
@@ -103,6 +105,11 @@ class ToolResultEvent:
     output: str
     is_error: bool
     elapsed: float
+    artifact_path: str = ""
+    truncated: bool = False
+    total_bytes: int = 0
+    next_offset: int | None = None
+    content_blocks: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -251,7 +258,11 @@ def partition_tool_calls(
     batches: list[ToolBatch] = []
     for tc in tool_calls:
         tool = registry.get(tc.tool_name)
-        safe = tool is not None and tool.is_concurrency_safe and registry.is_enabled(tc.tool_name)
+        safe = (
+            tool is not None
+            and tool.is_call_concurrency_safe(tc.arguments)
+            and registry.is_enabled(tc.tool_name)
+        )
 
         if safe and batches and batches[-1].concurrent:
             batches[-1].calls.append(tc)
@@ -288,6 +299,7 @@ class Agent:
         hook_engine: HookEngine | None = None,
         run_limits: RunLimits | None = None,
         recall_fn: Callable[[str], Awaitable[str]] | None = None,
+        instruction_resolver: Any | None = None,
     ) -> None:
         self.client = client
         self.registry = registry
@@ -310,6 +322,7 @@ class Agent:
         self.total_input_tokens = 0
         self.total_output_tokens = 0
         self.instructions_content = instructions_content
+        self.instruction_resolver = instruction_resolver
         self.memory_manager = memory_manager
         self.hook_engine = hook_engine
         self.run_limits = run_limits or RunLimits()
@@ -317,6 +330,7 @@ class Agent:
         # 在 run() 开始时构造；此前为 None（例如 fork 尚未进入循环）。
         self._run_context: RunContext | None = None
         self._loop_count = 0
+        self._memory_state_at_run_start: tuple[tuple[str, int, int], ...] = ()
         # 记忆提取合并策略：
         # _extracting: 标记是否有提取正在进行
         # _pending_extraction: 提取期间又触发了新请求，保留最新快照做尾随提取
@@ -328,6 +342,8 @@ class Agent:
             self._consolidator = MemoryConsolidator(work_dir)
         self.session_id: str = ""
         self.active_skills: dict[str, str] = {}
+        self._active_skill_allowed_tools: set[str] = set()
+        self._active_skill_disallowed_tools: set[str] = set()
         self._skill_catalog: str = ""
         self._agent_catalog: str = ""
         self._agent_catalog_list: list[tuple[str, str]] = []
@@ -446,6 +462,20 @@ class Agent:
                     self._agent_catalog,
                 )
             )
+        resolver = getattr(self, "instruction_resolver", None)
+        if resolver is not None and str(resolver.work_dir) != resolved:
+            from myclaude.memory.instructions import InstructionResolver
+
+            refreshed = InstructionResolver(
+                resolved, include_project=resolver.include_project
+            )
+            self.instruction_resolver = refreshed
+            initial = refreshed.initial_content
+            if initial and initial not in getattr(self, "instructions_content", ""):
+                if self.instructions_content:
+                    self.instructions_content += "\n\n---\n\n" + initial
+                else:
+                    self.instructions_content = initial
 
     @property
     def _transcript_path(self) -> str:
@@ -562,8 +592,23 @@ class Agent:
         if self.permission_checker:
             self.permission_checker.mode = mode
 
-    def activate_skill(self, name: str, prompt_body: str) -> None:
+    def activate_skill(
+        self,
+        name: str,
+        prompt_body: str,
+        *,
+        allowed_tools: list[str] | None = None,
+        disallowed_tools: list[str] | None = None,
+    ) -> bool:
+        if self.active_skills.get(name) == prompt_body:
+            return False
         self.active_skills[name] = prompt_body
+        allowed = getattr(self, "_active_skill_allowed_tools", set())
+        disallowed = getattr(self, "_active_skill_disallowed_tools", set())
+        allowed.update(allowed_tools or [])
+        disallowed.update(disallowed_tools or [])
+        self._active_skill_allowed_tools = allowed
+        self._active_skill_disallowed_tools = disallowed
         # 统一在领域方法里记录 recovery，确保无论从哪个入口激活（模型工具
         # LoadSkill、斜杠命令 inline），auto-compact 后的恢复附件都能带上该 skill
         # 的 SOP，不会因入口不同而静默丢失。getattr 与 executor fork 路径保持一致，
@@ -571,9 +616,12 @@ class Agent:
         recovery = getattr(self, "recovery_state", None)
         if recovery is not None:
             recovery.record_skill_invocation(name, prompt_body)
+        return True
 
     def clear_active_skills(self) -> None:
         self.active_skills.clear()
+        self._active_skill_allowed_tools.clear()
+        self._active_skill_disallowed_tools.clear()
 
     def set_skill_catalog(self, catalog: str) -> None:
         self._skill_catalog = catalog
@@ -596,6 +644,45 @@ class Agent:
 
     def _infer_file_path(self, args: dict) -> str:
         return str(args.get("file_path", args.get("path", "")))
+
+    @staticmethod
+    def _skill_tool_pattern_matches(
+        pattern: str, tool_name: str, arguments: dict[str, Any], tool: Any
+    ) -> bool:
+        pattern = pattern.strip()
+        selector = ""
+        name_pattern = pattern
+        if "(" in pattern and pattern.endswith(")"):
+            name_pattern, selector = pattern.split("(", 1)
+            selector = selector[:-1]
+        if not fnmatch.fnmatchcase(tool_name.casefold(), name_pattern.casefold()):
+            return False
+        if not selector:
+            return True
+        scope = tool.permission_scope(arguments)
+        values = [scope.content, scope.path, str(arguments.get("command", ""))]
+        selector_variants = {selector}
+        if ":" in selector:
+            selector_variants.add(selector.replace(":", " ", 1))
+        return any(
+            fnmatch.fnmatchcase(value, candidate)
+            for value in values
+            if value
+            for candidate in selector_variants
+        )
+
+    def _skill_tool_policy(
+        self, tool_name: str, arguments: dict[str, Any], tool: Any
+    ) -> tuple[bool, bool]:
+        denied = any(
+            self._skill_tool_pattern_matches(pattern, tool_name, arguments, tool)
+            for pattern in self._active_skill_disallowed_tools
+        )
+        allowed = any(
+            self._skill_tool_pattern_matches(pattern, tool_name, arguments, tool)
+            for pattern in self._active_skill_allowed_tools
+        )
+        return denied, allowed
 
     def _drain_hook_events(self) -> list[HookEvent]:
         if not self.hook_engine:
@@ -634,6 +721,8 @@ class Agent:
 
     async def run(self, conversation: ConversationManager) -> AsyncIterator[AgentEvent]:
         self._current_conversation = conversation
+        if self.memory_manager is not None:
+            self._memory_state_at_run_start = self.memory_manager.state_token()
         env_context = self.prepare_conversation(conversation)
         # The deadline starts before lifecycle hooks so every external await in
         # this run shares the same wall-clock budget.
@@ -716,6 +805,7 @@ class Agent:
                 hook_prompts=hook_prompts,
                 coordinator_mode=self.coordinator_mode,
                 agent_catalog=self._agent_catalog_list or None,
+                work_dir=self.work_dir,
             )
 
             if self.plan_mode:
@@ -735,7 +825,7 @@ class Agent:
                     )
 
             deferred_names = self.registry.get_deferred_tool_names()
-            if deferred_names:
+            if deferred_names and not self.registry.native_deferred_loading:
                 conversation.add_system_reminder(
                     "The following deferred tools are available via ToolSearch. "
                     "Their schemas are NOT loaded - use ToolSearch with "
@@ -994,10 +1084,7 @@ class Agent:
                     response.text, thinking_blocks=conv_thinking
                 )
                 self._loop_count += 1
-                if (
-                    self._loop_count % MEMORY_EXTRACTION_INTERVAL == 0
-                    and self.memory_manager
-                ):
+                if self._should_extract_memories(conversation):
                     self._spawn_background(
                         self._extract_memories(conversation.snapshot())
                     )
@@ -1151,14 +1238,13 @@ class Agent:
                     consecutive_unknown += 1
                 else:
                     consecutive_unknown = 0
-                content = self._maybe_persist_or_truncate(
-                    br.tool_id, br.result.output
-                )
+                content = self._prepare_tool_result(br.tool_id, br.result)
                 tool_results.append(
                     ToolResultBlock(
                         tool_use_id=br.tool_id,
                         content=content,
                         is_error=br.result.is_error,
+                        content_blocks=br.result.content_blocks,
                     )
                 )
                 yield ToolResultEvent(
@@ -1167,6 +1253,11 @@ class Agent:
                     output=br.result.output,
                     is_error=br.result.is_error,
                     elapsed=br.elapsed,
+                    artifact_path=br.result.artifact_path,
+                    truncated=br.result.truncated,
+                    total_bytes=br.result.total_bytes,
+                    next_offset=br.result.next_offset,
+                    content_blocks=br.result.content_blocks,
                 )
 
             if consecutive_unknown >= 3:
@@ -1300,6 +1391,17 @@ class Agent:
             yield result, elapsed, is_unknown
             return
 
+        skill_denied, skill_allowed = self._skill_tool_policy(
+            tc.tool_name, tc.arguments, tool
+        )
+        if skill_denied:
+            result = ToolResult(
+                output=f"Skill policy denied tool '{tc.tool_name}'",
+                is_error=True,
+            )
+            yield result, time.monotonic() - start, is_unknown
+            return
+
         if tc.parse_error:
             result = ToolResult(
                 output=f"Tool arguments are not valid JSON: {tc.parse_error}",
@@ -1316,6 +1418,28 @@ class Agent:
             )
             yield result, time.monotonic() - start, is_unknown
             return
+
+        if tool.category == "write":
+            new_instructions = self._load_path_instructions(tc)
+            if new_instructions:
+                result = ToolResult(
+                    output=(
+                        "No write was performed because additional instructions "
+                        "became applicable for this path. Review them and retry "
+                        "the operation if it still complies.\n\n"
+                        "<system-reminder>\n"
+                        + new_instructions
+                        + "\n</system-reminder>"
+                    ),
+                    is_error=True,
+                    metadata={
+                        "instruction_sources": self.instruction_resolver.diagnostics()[
+                            "loaded"
+                        ]
+                    },
+                )
+                yield result, time.monotonic() - start, is_unknown
+                return
 
         # Every delivery surface and sub-agent goes through the same hook path.
         if self.hook_engine:
@@ -1345,7 +1469,7 @@ class Agent:
                 return
 
         # 权限检查
-        if self.permission_checker:
+        if self.permission_checker and not skill_allowed:
             decision = self.permission_checker.check(tool, tc.arguments)
 
             if decision.effect == "deny":
@@ -1396,14 +1520,16 @@ class Agent:
                     pattern = content
                     # 持久化规则写入本地文件
                     rule = Rule(
-                        tool_name=tc.tool_name,
+                        tool_name=tool.permission_rule_name(tc.arguments),
                         pattern=pattern,
                         effect="allow",
                         match="literal",
                     )
                     self.permission_checker.rule_engine.append_local_rule(rule)
                     # 同时加入会话级放行集合，本轮立即生效无需磁盘读取
-                    self.permission_checker.add_session_allow(tc.tool_name, content)
+                    self.permission_checker.add_session_allow(
+                        tool.permission_rule_name(tc.arguments), content
+                    )
 
         try:
             execution = asyncio.create_task(tool.execute(params))
@@ -1498,8 +1624,47 @@ class Agent:
                         is_error=True,
                     )
 
+        self._apply_path_instructions(tc, result)
         elapsed = time.monotonic() - start
         yield result, elapsed, is_unknown
+
+    def _apply_path_instructions(
+        self, tc: ToolCallComplete, result: ToolResult
+    ) -> None:
+        if result.is_error:
+            return
+        instructions = self._load_path_instructions(tc)
+        if not instructions:
+            return
+        result.output = (
+            result.output.rstrip()
+            + "\n\n<system-reminder>\n"
+            + "Additional instructions became applicable for this path:\n\n"
+            + instructions
+            + "\n</system-reminder>"
+        )
+        result.metadata["instruction_sources"] = self.instruction_resolver.diagnostics()[
+            "loaded"
+        ]
+
+    def _load_path_instructions(self, tc: ToolCallComplete) -> str:
+        if self.instruction_resolver is None:
+            return ""
+        if tc.tool_name not in {"ReadFile", "EditFile", "WriteFile", "DeleteFile"}:
+            return ""
+        value = self._infer_file_path(tc.arguments)
+        if not value:
+            return ""
+        tool = self.registry.get(tc.tool_name)
+        path = tool.resolve_path(value) if tool is not None else Path(value)
+        instructions = self.instruction_resolver.on_file_access(path)
+        if not instructions:
+            return ""
+        if self.instructions_content:
+            self.instructions_content += "\n\n---\n\n" + instructions
+        else:
+            self.instructions_content = instructions
+        return instructions
 
     def _snapshot_for_recovery(
         self, tc: ToolCallComplete, result: ToolResult
@@ -1556,6 +1721,47 @@ class Agent:
                 log.debug("[extractMemories] running trailing extraction for stashed context")
                 await self._extract_memories(pending)
 
+    def _should_extract_memories(self, conversation: ConversationManager) -> bool:
+        if self.memory_manager is None:
+            return False
+        if self._loop_count % MEMORY_EXTRACTION_INTERVAL != 0:
+            return False
+        if self.memory_manager.state_token() != self._memory_state_at_run_start:
+            return False
+
+        user_text = "\n".join(
+            message.content.casefold()
+            for message in conversation.history[-20:]
+            if message.role == "user" and message.source == "user" and message.content
+        )
+        candidate_terms = (
+            "remember",
+            "keep in mind",
+            "from now on",
+            "i prefer",
+            "my preference",
+            "actually,",
+            "that's wrong",
+            "do not do that",
+            "记住",
+            "以后",
+            "我的偏好",
+            "我更喜欢",
+            "不对",
+            "不要再",
+        )
+        explicit_signal = any(term in user_text for term in candidate_terms)
+        recent_errors = sum(
+            1
+            for message in conversation.history[-12:]
+            for result in message.tool_results
+            if result.is_error
+        )
+        content_messages = sum(
+            1 for message in conversation.history if message.content.strip()
+        )
+        return explicit_signal or recent_errors >= 2 or content_messages >= 30
+
     async def manual_compact(
         self, conversation: ConversationManager
     ) -> CompactNotification | ErrorEvent:
@@ -1594,6 +1800,10 @@ class Agent:
     async def run_to_completion(
         self, task: str, conversation: ConversationManager | None = None,
         event_callback: Callable[[dict[str, Any]], None] | None = None,
+        permission_handler: Callable[
+            [PermissionRequest],
+            Awaitable[PermissionResponse | None] | PermissionResponse | None,
+        ] | None = None,
     ) -> str:
         if conversation is None:
             conversation = ConversationManager()
@@ -1623,6 +1833,11 @@ class Agent:
                             "toolName": event.tool_name,
                             "output": event.output,
                             "isError": event.is_error,
+                            "artifactPath": event.artifact_path,
+                            "truncated": event.truncated,
+                            "totalBytes": event.total_bytes,
+                            "nextOffset": event.next_offset,
+                            "contentBlocks": event.content_blocks,
                         }
                     )
             elif isinstance(event, UsageEvent):
@@ -1640,13 +1855,26 @@ class Agent:
                         }
                     )
             elif isinstance(event, PermissionRequest):
-                if not event.future.done():
-                    event.future.set_result(PermissionResponse.DENY)
+                if permission_handler is None:
+                    if not event.future.done():
+                        event.future.set_result(PermissionResponse.DENY)
+                else:
+                    response = permission_handler(event)
+                    if inspect.isawaitable(response):
+                        response = await response
+                    if response is not None and not event.future.done():
+                        event.future.set_result(response)
             elif isinstance(event, TurnComplete):
+                if event_callback:
+                    event_callback({"type": "turn_complete", "turn": event.turn})
                 if current_text:
                     last_text = current_text
                 current_text = ""
             elif isinstance(event, LoopComplete):
+                if event_callback:
+                    event_callback(
+                        {"type": "loop_complete", "totalTurns": event.total_turns}
+                    )
                 if current_text:
                     last_text = current_text
             elif isinstance(event, ErrorEvent):
@@ -1659,16 +1887,23 @@ class Agent:
         execution = await self._execute_single_tool_direct(tc)
         return execution.result
 
-    def _maybe_persist_or_truncate(self, tool_use_id: str, text: str) -> str:
+    def _prepare_tool_result(self, tool_use_id: str, result: ToolResult) -> str:
         from myclaude.context.manager import (
-            SINGLE_RESULT_CHAR_LIMIT,
             make_persisted_preview,
             persist_tool_result,
         )
 
-        if len(text) > SINGLE_RESULT_CHAR_LIMIT:
-            fp = persist_tool_result(tool_use_id, text, self.session_dir)
-            return make_persisted_preview(text, fp)
+        text = result.output
+        result.total_bytes = result.total_bytes or len(text.encode("utf-8"))
+        if result.artifact_path:
+            return text
         if len(text) > MAX_OUTPUT_CHARS:
-            return text[:MAX_OUTPUT_CHARS] + "\n… (output truncated)"
+            fp = persist_tool_result(tool_use_id, text, self.session_dir)
+            result.artifact_path = str(fp)
+            result.truncated = True
+            return make_persisted_preview(text, fp)
         return text
+
+    def _maybe_persist_or_truncate(self, tool_use_id: str, text: str) -> str:
+        """Compatibility wrapper retained for callers outside the main loop."""
+        return self._prepare_tool_result(tool_use_id, ToolResult(output=text))

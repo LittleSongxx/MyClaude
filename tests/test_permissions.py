@@ -270,7 +270,7 @@ class TestRuleEngine:
         assert engine.evaluate("Bash", "rm -rf build") == "deny"
         assert engine.evaluate("Bash", "npm test") is None
 
-    def test_same_tier_last_wins(self) -> None:
+    def test_same_tier_deny_wins_over_allow(self) -> None:
         tmpdir = Path(tempfile.mkdtemp())
         rules_file = tmpdir / "rules.yaml"
         rules_file.write_text(yaml.dump([
@@ -278,9 +278,9 @@ class TestRuleEngine:
             {"rule": "Bash(git *)", "effect": "allow"},
         ]))
         engine = RuleEngine(project_rules_path=rules_file)
-        assert engine.evaluate("Bash", "git status") == "allow"
+        assert engine.evaluate("Bash", "git status") == "deny"
 
-    def test_higher_tier_wins(self) -> None:
+    def test_global_deny_wins_across_tiers(self) -> None:
         tmpdir = Path(tempfile.mkdtemp())
         user_file = tmpdir / "user.yaml"
         project_file = tmpdir / "project.yaml"
@@ -292,6 +292,86 @@ class TestRuleEngine:
         ]))
         engine = RuleEngine(user_rules_path=user_file, project_rules_path=project_file)
         assert engine.evaluate("Bash", "rm -rf build/") == "deny"
+
+    def test_project_deny_is_not_hidden_by_user_allow(self) -> None:
+        tmpdir = Path(tempfile.mkdtemp())
+        user_file = tmpdir / "user.yaml"
+        project_file = tmpdir / "project.yaml"
+        user_file.write_text(yaml.dump([
+            {"rule": "Bash(git *)", "effect": "allow"},
+        ]))
+        project_file.write_text(yaml.dump([
+            {"rule": "Bash(git push *)", "effect": "deny"},
+        ]))
+        engine = RuleEngine(user_rules_path=user_file, project_rules_path=project_file)
+
+        assert engine.evaluate("Bash", "git status") == "allow"
+        assert engine.evaluate("Bash", "git push origin main") == "deny"
+
+    def test_ask_wins_over_allow_across_tiers(self) -> None:
+        tmpdir = Path(tempfile.mkdtemp())
+        user_file = tmpdir / "user.yaml"
+        project_file = tmpdir / "project.yaml"
+        user_file.write_text(yaml.dump([
+            {"rule": "Bash(git *)", "effect": "allow"},
+        ]))
+        project_file.write_text(yaml.dump([
+            {"rule": "Bash(git push *)", "effect": "ask"},
+        ]))
+        engine = RuleEngine(user_rules_path=user_file, project_rules_path=project_file)
+
+        assert engine.evaluate("Bash", "git push origin main") == "ask"
+
+    def test_compound_bash_requires_each_subcommand_to_be_allowed(self) -> None:
+        tmpdir = Path(tempfile.mkdtemp())
+        rules_file = tmpdir / "rules.yaml"
+        rules_file.write_text(yaml.dump([
+            {"rule": "Bash(git status*)", "effect": "allow"},
+        ]))
+        engine = RuleEngine(project_rules_path=rules_file)
+
+        assert engine.evaluate("Bash", "git status && rm -rf build") is None
+
+    @pytest.mark.parametrize("separator", ["&&", "||", ";", "|", "|&", "&", "\n"])
+    def test_compound_bash_allows_fully_covered_commands(
+        self, separator: str
+    ) -> None:
+        tmpdir = Path(tempfile.mkdtemp())
+        rules_file = tmpdir / "rules.yaml"
+        rules_file.write_text(yaml.dump([
+            {"rule": "Bash(git status*)", "effect": "allow"},
+            {"rule": "Bash(npm test*)", "effect": "allow"},
+        ]))
+        engine = RuleEngine(project_rules_path=rules_file)
+
+        command = f"git status {separator} npm test"
+        assert engine.evaluate("Bash", command) == "allow"
+
+    def test_quoted_separator_is_not_split(self) -> None:
+        tmpdir = Path(tempfile.mkdtemp())
+        rules_file = tmpdir / "rules.yaml"
+        rules_file.write_text(yaml.dump([
+            {"rule": "Bash(printf *)", "effect": "allow"},
+        ]))
+        engine = RuleEngine(project_rules_path=rules_file)
+
+        assert engine.evaluate("Bash", "printf 'a && b'") == "allow"
+
+    @pytest.mark.parametrize(
+        "command",
+        ["echo $(rm -rf build)", "echo `rm -rf build`", "(git status; npm test)"],
+    )
+    def test_ambiguous_shell_syntax_cannot_be_auto_allowed(
+        self, command: str
+    ) -> None:
+        tmpdir = Path(tempfile.mkdtemp())
+        rules_file = tmpdir / "rules.yaml"
+        rules_file.write_text(yaml.dump([
+            {"rule": "Bash(*)", "effect": "allow"},
+        ]))
+        engine = RuleEngine(project_rules_path=rules_file)
+
+        assert engine.evaluate("Bash", command) is None
 
     def test_missing_file_no_error(self) -> None:
         engine = RuleEngine(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
@@ -11,6 +12,7 @@ from myclaude.tools.file_io import atomic_write_text, locked_path
 
 if TYPE_CHECKING:
     from myclaude.cache import FileCache
+    from myclaude.diagnostics import LSPDiagnostics
     from myclaude.tools.file_state_cache import FileStateCache
 
 
@@ -34,10 +36,11 @@ class EditFile(Tool):
         return PermissionScope(content=path, path=path)
 
 
-    def __init__(self, file_cache: FileCache | None = None, file_history: Any = None, file_state_cache: FileStateCache | None = None) -> None:
+    def __init__(self, file_cache: FileCache | None = None, file_history: Any = None, file_state_cache: FileStateCache | None = None, diagnostics: LSPDiagnostics | None = None) -> None:
         self._cache = file_cache
         self.file_history = file_history
         self._state_cache = file_state_cache
+        self._diagnostics = diagnostics
 
 
     async def execute(self, params: Params) -> ToolResult:
@@ -102,4 +105,11 @@ class EditFile(Tool):
                 )
                 return ToolResult(output=f"{summary}\n{diff.text}")
 
-        return await asyncio.to_thread(edit)
+        result = await asyncio.to_thread(edit)
+        from myclaude.diagnostics import append_post_edit_diagnostics
+        return await append_post_edit_diagnostics(
+            result,
+            path,
+            self._diagnostics,
+            workspace=Path(self.work_dir or path.parent),
+        )
